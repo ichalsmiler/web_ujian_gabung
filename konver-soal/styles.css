@@ -359,3 +359,6 @@ body.mode-admin #start, body.mode-admin #work, body.mode-admin #topActions { dis
 }
 .impor-pratinjau { margin: 4px 0 10px; font-size: 14px; }
 .impor-pratinjau summary { cursor: pointer; color: var(--ink); margin-bottom: 6px; }
+/* Tautan ke Konvert User (server gabungan) */
+.app-link { margin-left: auto; text-decoration: none; }
+.app-link[hidden] { display: none; }

@@ -1,2 +1,2 @@
-konver-soal  V3.0  d08edaf Teks bacaan di atas soal ikut masuk ke soal (tidak dibuang lagi)
-web-ujian    23774c0 feat: cocokkan nama moving satu baris per siswa, kandidat lebih tepat
+konver-soal  V3.1  85fff50 Tautan Konvert User di bilah atas (hanya bila /user/ ada di server yang sama)
+web-ujian    f5fda77 Judul jadi Konvert User; tautan ke Konver Soal di server gabungan (/user/)

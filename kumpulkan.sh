@@ -2,7 +2,7 @@
 #
 # (Di komputer pengembang) Menyusun ulang isi repo ini dari dua repo sumber di folder sebelah:
 #   ../konver-soal  -> konver-soal/      (versi yang sudah di-commit, HEAD)
-#   ../web-ujian    -> ujian/index.html  (hasil npm run build)
+#   ../web-ujian    -> user/index.html  (hasil npm run build)
 # Lalu periksa, commit, dan push repo ini; di server jalankan perbarui.sh.
 #
 set -euo pipefail
@@ -16,9 +16,9 @@ rm -rf konver-soal && mkdir konver-soal
 g -C "$KS" archive HEAD | tar -x -C konver-soal
 rm -rf konver-soal/.githooks konver-soal/.gitattributes konver-soal/deploy konver-soal/contoh-berantakan.docx
 
-echo "==> Web Ujian ($WU, build)"
+echo "==> Konvert User ($WU, build)"
 (cd "$WU" && npm run build --silent)
-mkdir -p ujian && cp "$WU/dist/index.html" ujian/index.html
+mkdir -p user && cp "$WU/dist/index.html" user/index.html
 
 printf 'konver-soal  V%s  %s\nweb-ujian    %s\n' \
   "$(tr -d '\r\n' < "$KS/VERSION")" "$(g -C "$KS" log -1 --format='%h %s')" "$(g -C "$WU" log -1 --format='%h %s')" > SUMBER.txt

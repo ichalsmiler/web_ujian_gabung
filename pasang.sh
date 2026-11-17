@@ -2,7 +2,7 @@
 #
 # Web Ujian Gabung: memasang DUA aplikasi di SATU server Debian 12/13 (dengan sudo):
 #   http://IP-SERVER/        -> Konver Soal (+ layanan Kirim soal ke email, halaman admin)
-#   http://IP-SERVER/ujian/  -> Web Ujian (konverter jadwal & user CBT)
+#   http://IP-SERVER/user/  -> Konvert User (jadwal & user CBT)
 #
 # Pemakaian (file aplikasi akan dimiliki user biasa, mis. smiler):
 #   sebagai root (Debian minimal tanpa sudo):
@@ -24,7 +24,7 @@ PEMILIK="${PEMILIK:-${SUDO_USER:-}}"
 if [[ -z "$PEMILIK" || "$PEMILIK" == root ]] && id smiler >/dev/null 2>&1; then PEMILIK=smiler; fi
 ROOT_APPS=/srv/apps
 KONVER="$ROOT_APPS/konver-soal"
-UJIAN="$ROOT_APPS/ujian"
+UJIAN="$ROOT_APPS/user"
 STATE=/var/lib/konver-soal
 ENV_DIR=/etc/konver-soal
 ENV_FILE="$ENV_DIR/kirim.env"
@@ -179,7 +179,7 @@ if [[ -f "$KONVER/server/kirim.js" ]]; then systemctl restart "$SVC"; fi
 # ---------- nginx: dua aplikasi dalam satu situs ----------
 info "Menulis konfigurasi nginx ($SITE)"
 cat > "$SITE" <<NGINX
-# Dibuat oleh siapkan-server-apps.sh: Konver Soal di / dan Web Ujian di /ujian/
+# Dibuat oleh siapkan-server-apps.sh: Konver Soal di / dan Konvert User di /user/
 server {
     listen 80;
     listen [::]:80;
@@ -216,11 +216,11 @@ server {
         add_header Cache-Control "no-store" always;
     }
 
-    # ---- Web Ujian (satu file index.html) ----
-    location = /ujian { return 301 /ujian/; }
-    location /ujian/ {
+    # ---- Konvert User (satu file index.html) ----
+    location = /user { return 301 /user/; }
+    location /user/ {
         alias $UJIAN/;
-        try_files \$uri \$uri/ /ujian/index.html;
+        try_files \$uri \$uri/ /user/index.html;
         add_header Cache-Control "no-cache" always;
     }
 
@@ -249,7 +249,7 @@ IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo
 info "Server siap."
 echo "    Konver Soal : http://${IP}/        (file: $KONVER)"
-echo "    Web Ujian   : http://${IP}/ujian/  (file: $UJIAN/index.html)"
+echo "    Konvert User: http://${IP}/user/  (file: $UJIAN/index.html)"
 echo "    Data admin  : $STATE   Pengaturan rahasia: $ENV_FILE"
 punya SMTP_PASS && echo "    Kirim       : akun pengirim terisi" || warn "Kirim belum aktif (akun pengirim kosong)."
 punya ADMIN_PASS && echo "    Admin       : sandi terisi" || warn "Sandi admin belum diatur."

@@ -1417,6 +1417,12 @@
   }));
   loadGuru();
   routeAdmin();
+  // Tautan ke Konvert User hanya bila aplikasinya ada di server yang sama (/user/).
+  if (location.protocol !== 'file:') {
+    fetch('user/', { method: 'HEAD', cache: 'no-store' })
+      .then(r => { if (r.ok && /html/i.test(r.headers.get('content-type') || '')) $('#keKonvertUser').hidden = false; })
+      .catch(() => {});
+  }
   // Soal bisa diubah lagi setelah dialog ditutup: RTF yang sudah disiapkan tidak dipakai ulang.
   $('#kirimDialog').addEventListener('close', () => { rtfJob = null; });
   // Pencarian nama guru
