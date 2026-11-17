@@ -13,13 +13,16 @@ Repo ini berisi hasil siap pakai. Kode sumbernya ada di
 
 ## Pasang (sekali, Debian 12/13)
 
-Masuk ke server sebagai user biasa yang punya sudo (mis. `smiler`), lalu:
+Masuk ke server (mis. sebagai `smiler`), lalu jalankan sebagai root. Debian minimal belum punya `sudo`, jadi pakai `su` (sandi root):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ichalsmiler/web_ujian_gabung/main/pasang.sh | sudo bash
+su -c "curl -fsSL https://raw.githubusercontent.com/ichalsmiler/web_ujian_gabung/main/pasang.sh | bash"
 ```
 
-Skrip ini memasang nginx, Node.js, git, dan rsync; mengunduh repo ke `/opt/web_ujian_gabung`; menyalin
+Bila `sudo` sudah ada: `curl -fsSL https://raw.githubusercontent.com/ichalsmiler/web_ujian_gabung/main/pasang.sh | sudo bash`.
+File aplikasi dimiliki user pemanggil sudo, atau `smiler` bila dijalankan sebagai root (ganti dengan `PEMILIK=namauser`).
+
+Skrip ini memasang sudo, nginx, Node.js, git, dan rsync; mengunduh repo ke `/opt/web_ujian_gabung`; menyalin
 aplikasi ke `/srv/apps/konver-soal` dan `/srv/apps/ujian`; memasang layanan `konver-soal-kirim`
 (berjalan sebagai user tadi); dan membuat situs nginx. Saat pertama dipasang, skrip menanyakan:
 

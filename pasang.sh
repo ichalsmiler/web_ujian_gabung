@@ -4,8 +4,11 @@
 #   http://IP-SERVER/        -> Konver Soal (+ layanan Kirim soal ke email, halaman admin)
 #   http://IP-SERVER/ujian/  -> Web Ujian (konverter jadwal & user CBT)
 #
-# Pemakaian (dari user biasa yang punya sudo, mis. smiler):
-#   curl -fsSL https://raw.githubusercontent.com/ichalsmiler/web_ujian_gabung/main/pasang.sh | sudo bash
+# Pemakaian (file aplikasi akan dimiliki user biasa, mis. smiler):
+#   sebagai root (Debian minimal tanpa sudo):
+#     su -c "curl -fsSL https://raw.githubusercontent.com/ichalsmiler/web_ujian_gabung/main/pasang.sh | bash"
+#   atau bila sudo sudah ada:
+#     curl -fsSL https://raw.githubusercontent.com/ichalsmiler/web_ujian_gabung/main/pasang.sh | sudo bash
 #
 # Kode diunduh ke /opt/web_ujian_gabung, file aplikasi disalin ke /srv/apps/... (milik user itu).
 # Update berikutnya TANPA sudo:  bash /opt/web_ujian_gabung/perbarui.sh
@@ -16,7 +19,9 @@ set -euo pipefail
 REPO="${REPO:-https://github.com/ichalsmiler/web_ujian_gabung.git}"
 CABANG="${CABANG:-main}"
 KODE=/opt/web_ujian_gabung
+# Pemilik file aplikasi: pemanggil sudo, atau PEMILIK=..., atau user "smiler" bila ada.
 PEMILIK="${PEMILIK:-${SUDO_USER:-}}"
+if [[ -z "$PEMILIK" || "$PEMILIK" == root ]] && id smiler >/dev/null 2>&1; then PEMILIK=smiler; fi
 ROOT_APPS=/srv/apps
 KONVER="$ROOT_APPS/konver-soal"
 UJIAN="$ROOT_APPS/ujian"
@@ -33,8 +38,8 @@ info() { echo "${c_ok}==>${c_off} $*"; }
 warn() { echo "${c_warn}[!]${c_off} $*"; }
 die()  { echo "${c_err}[x]${c_off} $*" >&2; exit 1; }
 
-[[ $EUID -eq 0 ]] || die "Jalankan dengan sudo: sudo bash $0"
-[[ -n "$PEMILIK" && "$PEMILIK" != root ]] || die "Jalankan lewat sudo dari user biasa (mis. smiler), atau set PEMILIK=namauser."
+[[ $EUID -eq 0 ]] || die "Jalankan sebagai root (su -) atau dengan sudo."
+[[ -n "$PEMILIK" && "$PEMILIK" != root ]] || die "Tentukan pemilik file aplikasi, mis.: PEMILIK=smiler bash pasang.sh"
 id "$PEMILIK" >/dev/null 2>&1 || die "User $PEMILIK tidak ada."
 command -v apt-get >/dev/null || die "Skrip ini untuk Debian/Ubuntu."
 
@@ -42,21 +47,21 @@ command -v apt-get >/dev/null || die "Skrip ini untuk Debian/Ubuntu."
 info "Memasang paket: nginx nodejs git rsync curl"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq </dev/null
-apt-get install -y -qq nginx nodejs git rsync curl ca-certificates </dev/null >/dev/null
+apt-get install -y -qq sudo nginx nodejs git rsync curl ca-certificates </dev/null >/dev/null
 echo "    nginx $(nginx -v 2>&1 | sed 's/.*\///'), Node.js $(node --version)"
 
 # ---------- Kode dari GitHub (milik $PEMILIK, agar update tidak perlu sudo) ----------
 if [[ -d "$KODE/.git" ]]; then
   info "Mengambil versi terbaru di $KODE"
   chown -R "$PEMILIK:$PEMILIK" "$KODE"
-  sudo -u "$PEMILIK" git -C "$KODE" fetch --quiet origin "$CABANG"
-  sudo -u "$PEMILIK" git -C "$KODE" reset --quiet --hard "origin/$CABANG"
+  runuser -u "$PEMILIK" -- git -C "$KODE" fetch --quiet origin "$CABANG"
+  runuser -u "$PEMILIK" -- git -C "$KODE" reset --quiet --hard "origin/$CABANG"
 else
   info "Mengunduh $REPO ke $KODE"
   install -d -o "$PEMILIK" -g "$PEMILIK" "$KODE"
-  sudo -u "$PEMILIK" git clone --quiet --branch "$CABANG" "$REPO" "$KODE" </dev/null
+  runuser -u "$PEMILIK" -- git clone --quiet --branch "$CABANG" "$REPO" "$KODE" </dev/null
 fi
-echo "    Versi: $(sudo -u "$PEMILIK" git -C "$KODE" log -1 --format='%h %s')"
+echo "    Versi: $(runuser -u "$PEMILIK" -- git -C "$KODE" log -1 --format='%h %s')"
 
 # ---------- Folder ----------
 info "Menyiapkan folder aplikasi (milik $PEMILIK)"
@@ -66,7 +71,7 @@ install -d -m 755 "$ENV_DIR"
 # nginx (www-data) cukup membaca file aplikasi
 chmod o+rx "$ROOT_APPS" "$KONVER" "$UJIAN"
 info "Menyalin aplikasi ke $ROOT_APPS"
-sudo -u "$PEMILIK" bash "$KODE/perbarui.sh" --tanpa-pull
+runuser -u "$PEMILIK" -- bash "$KODE/perbarui.sh" --tanpa-pull
 
 # ---------- Pengaturan email & sandi admin (rahasia, hanya root) ----------
 if [[ ! -f "$ENV_FILE" ]]; then
