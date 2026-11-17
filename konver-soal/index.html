@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Konverter Soal RTF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="styles.css?v=3.0">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M6.5 2.8h8l4.7 4.7v13.7H6.5z"/><path fill="none" stroke="currentColor" stroke-width="1.6" d="M14.5 2.8v4.7h4.7"/><circle cx="9.6" cy="12.4" r="1.2" fill="currentColor"/><path stroke="currentColor" stroke-width="1.6" d="M12.2 12.4h4.3M9.6 16.4h6.9"/></svg>
+      <div>
+        <strong>Konverter Soal Ujian <span class="version" id="appVersion" title="Versi aplikasi (naik otomatis setiap perubahan di GitHub)">V3.0</span></strong>
+        <span class="sub">Word → RTF</span>
+      </div>
+    </div>
+    <div class="top-actions" id="topActions" hidden>
+      <span class="file-chip" id="fileChip"></span>
+      <button class="btn ghost" id="btnReset" type="button">Ganti file</button>
+      <span class="block-hint" id="blockHint" hidden></span>
+      <button class="btn" id="btnExport" type="button">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M11 3h2v9.2l3.3-3.3 1.4 1.4L12 16l-5.7-5.7 1.4-1.4 3.3 3.3V3ZM5 18h14v2H5v-2Z"/></svg>
+        Ekspor RTF
+      </button>
+      <button class="btn primary" id="btnKirim" type="button">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M2 21 23 12 2 3v7l15 2-15 2v7Z"/></svg>
+        Kirim
+      </button>
+    </div>
+  </header>
+
+  <main id="start" class="start">
+    <section class="hero">
+      <h1>Aplikasi Konverter Soal SMAN 2 Makassar</h1>
+      <p>Unggah soal pilihan ganda dalam format apa pun. Nomor soal, opsi a–e, dan kunci jawaban dikenali, lalu disusun ulang menjadi <code>1.</code> → <code>a.–e.</code> → <code>ANS: B</code>.</p>
+    </section>
+
+    <label class="drop" id="drop">
+      <input type="file" id="fileInput" accept=".docx,.txt" hidden>
+      <span class="drop-sheet" aria-hidden="true">
+        <span class="ghost-line w60"></span>
+        <span class="ghost-opt"><i></i><span class="ghost-line w40"></span></span>
+        <span class="ghost-opt"><i class="on"></i><span class="ghost-line w50"></span></span>
+        <span class="ghost-opt"><i></i><span class="ghost-line w35"></span></span>
+      </span>
+      <strong>Pilih atau seret file .docx ke sini</strong>
+      <span class="drop-note">File diproses di browser ini, tidak diunggah ke server.</span>
+    </label>
+
+    <details class="paste">
+      <summary>Atau tempel teks soal</summary>
+      <textarea id="pasteText" rows="10" placeholder="1. Teks soal ....&#10;a. opsi&#10;b. opsi&#10;...&#10;Kunci: B"></textarea>
+      <button class="btn primary" id="btnPaste" type="button">Proses teks</button>
+    </details>
+
+    <section class="rules">
+      <h2>Yang dirapikan otomatis</h2>
+      <ul>
+        <li>Nomor <code>1.</code> <code>1)</code> <code>Soal 1.</code> atau numbering Word, dinomori ulang berurutan</li>
+        <li>Opsi <code>A.</code> <code>a)</code> <code>(a)</code>, opsi dalam satu baris, atau numbering huruf</li>
+        <li>Kunci dari <code>Kunci: B</code>, tanda <code>*</code>, opsi tebal/distabilo, atau tabel kunci di akhir dokumen</li>
+        <li>Kop, petunjuk, dan catatan dibuang; gambar, tabel, dan rumus dipertahankan</li>
+      </ul>
+    </section>
+    <p class="err" id="startError" hidden></p>
+    <p class="admin-link"><a class="link-btn" href="#admin" target="_blank" rel="noopener">Pengaturan admin</a></p>
+  </main>
+
+  <div id="work" class="work" hidden>
+    <aside class="side">
+      <section class="panel stats" id="stats"></section>
+
+      <div class="panel add-rail">
+        <button class="btn primary add-fab" type="button" data-add="mc">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>
+          Tambah soal
+        </button>
+      </div>
+
+      <section class="panel" id="issuePanel">
+        <h3>Perlu dicek</h3>
+        <div id="issueList" class="issue-list"></div>
+      </section>
+
+      <section class="panel">
+        <details class="settings">
+          <summary>Pengaturan ekspor</summary>
+          <label class="field">Judul bagian pilihan ganda
+            <input id="cfgTitle" value="Multiple choice">
+          </label>
+          <div class="field-row two">
+            <label class="field">Jumlah opsi
+              <select id="cfgOpt"><option>3</option><option>4</option><option selected>5</option></select>
+            </label>
+            <label class="field">Ukuran huruf
+              <select id="cfgSize"><option>11</option><option selected>12</option><option>14</option></select>
+            </label>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel" id="ignoredPanel">
+        <details>
+          <summary>Teks di luar soal (<span id="ignoredCount">0</span>)</summary>
+          <p class="hint">Baris ini tidak dimasukkan ke hasil (kop, petunjuk, catatan).</p>
+          <ul id="ignoredList" class="ignored"></ul>
+        </details>
+      </section>
+
+      <section class="panel">
+        <a class="link-btn" href="#admin" target="_blank" rel="noopener">Pengaturan admin</a>
+      </section>
+    </aside>
+
+    <section class="list">
+      <div class="list-head">
+        <div class="list-tools">
+          <div class="seg" role="group" aria-label="Filter">
+            <button type="button" class="on" data-filter="all">Semua</button>
+            <button type="button" data-filter="issues">Perlu dicek</button>
+          </div>
+        </div>
+        <span class="hint">Klik teks untuk mengedit · bulatan huruf = kunci · Shift+Enter: baris baru di opsi</span>
+      </div>
+      <div class="sheet">
+        <div id="questions"></div>
+        <button class="add-q" type="button" data-add="mc">+ Tambah soal</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <dialog id="kirimDialog" class="img-dialog kirim-dialog">
+    <form id="kirimForm" method="dialog">
+      <div class="kirim-warn">
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z"/></svg>
+        <div>
+          <strong>Apakah soal yang Anda kirim sudah diperiksa dengan baik dan benar?</strong>
+          <p class="hint" id="kirimInfo"></p>
+          <p class="hint" id="kirimTujuanRow">File RTF dan file Word asli akan dikirim ke <b id="kirimTujuan">terimasoal@sman2makassar.sch.id</b>.</p>
+          <p class="hint warn-text" id="kirimAsliNote" hidden></p>
+        </div>
+      </div>
+      <div class="field guru-field">
+        <label for="kirimNama">Nama guru</label>
+        <input id="kirimNama" type="search" autocomplete="off" placeholder="Ketik untuk mencari nama Anda…"
+          role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="guruList">
+        <ul id="guruList" class="guru-list" role="listbox" hidden></ul>
+      </div>
+      <label class="field">Mata pelajaran
+        <select id="kirimMapel" required disabled><option value="">— pilih nama guru dulu —</option></select>
+      </label>
+      <div class="field-row">
+        <label class="field">Kelas
+          <select id="kirimKelas" required>
+            <option value="">—</option><option>X</option><option>XI</option><option>XII</option>
+          </select>
+        </label>
+        <label class="field">Semester
+          <select id="kirimSemester" required>
+            <option value="">—</option><option>Ganjil</option><option>Genap</option>
+          </select>
+        </label>
+        <label class="field">Tahun ajaran
+          <select id="kirimTA" required>
+            <option value="">—</option>
+            <option value="2026">2026/2027</option><option value="2027">2027/2028</option>
+            <option value="2028">2028/2029</option><option value="2029">2029/2030</option>
+            <option value="2030">2030/2031</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint lock-note" id="lockNote" hidden>
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M7 10V7a5 5 0 0 1 10 0v3h1.5v11h-13V10H7Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>
+        Semester dan tahun ajaran ditetapkan admin.
+      </p>
+      <p class="hint">Nama file: <b id="kirimFileName">—</b></p>
+      <p class="err" id="kirimError" hidden></p>
+      <div class="kirim-actions">
+        <button class="btn" id="kirimBatal" type="button">Batal, periksa lagi</button>
+        <button class="btn primary" id="kirimOk" type="submit">Ya, kirim</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sentDialog" class="img-dialog sent-dialog" aria-labelledby="sentTitle">
+    <h2 id="sentTitle">Soal berhasil dikirim</h2>
+    <dl class="sent-info" id="sentInfo"></dl>
+    <div class="kirim-actions">
+      <button class="btn primary" id="sentClose" type="button">Tutup</button>
+    </div>
+  </dialog>
+
+  <!-- Halaman Pengaturan admin (alamat #admin), bukan pop-up -->
+  <main id="adminPage" class="admin-page" hidden aria-labelledby="adminTitle">
+    <form id="adminForm" class="admin-card">
+      <div class="admin-head">
+        <h1 id="adminTitle">Pengaturan admin</h1>
+        <a class="link-btn" href="./">← Kembali ke aplikasi</a>
+      </div>
+      <!-- Langkah 1: masukkan kata sandi. Menu baru muncul setelah sandi dicek benar oleh server. -->
+      <div id="adminLogin">
+        <p class="hint" id="adminLoginInfo">Masukkan kata sandi admin untuk membuka pengaturan.</p>
+        <label class="field">Kata sandi admin
+          <input id="adminSandi" type="password" autocomplete="current-password">
+        </label>
+        <p class="err" id="adminLoginError" hidden></p>
+        <div class="kirim-actions">
+          <button class="btn primary" id="adminMasuk" type="submit">Masuk</button>
+        </div>
+      </div>
+
+      <!-- Langkah 2: menu admin -->
+      <div id="adminMenu" hidden>
+      <section class="admin-guru admin-first" aria-labelledby="adminKunciTitle">
+      <h3 id="adminKunciTitle">Semester &amp; tahun ajaran</h3>
+      <p class="hint" id="adminStatus"></p>
+      <label class="check"><input type="checkbox" id="adminKunci"> Kunci semester dan tahun ajaran untuk semua guru</label>
+      <div class="field-row two admin-period">
+        <label class="field">Semester
+          <select id="adminSemester">
+            <option value="">—</option><option>Ganjil</option><option>Genap</option>
+          </select>
+        </label>
+        <label class="field">Tahun ajaran
+          <select id="adminTA">
+            <option value="">—</option>
+            <option value="2026/2027">2026/2027</option><option value="2027/2028">2027/2028</option>
+            <option value="2028/2029">2028/2029</option><option value="2029/2030">2029/2030</option>
+            <option value="2030/2031">2030/2031</option>
+          </select>
+        </label>
+      </div>
+      <p class="err" id="adminError" hidden></p>
+      <button class="btn primary" id="adminSimpan" type="button">Simpan kunci</button>
+      </section>
+      <section class="admin-guru" aria-labelledby="adminTutupTitle">
+        <h3 id="adminTutupTitle">Tutup pengiriman soal</h3>
+        <p class="hint" id="adminTutupStatus"></p>
+        <p class="hint">Mulai waktu ini guru tidak bisa mengirim soal (Ekspor RTF tetap bisa) sampai Anda membukanya lagi.</p>
+        <div class="field-row two">
+          <label class="field">Tanggal tutup
+            <input id="adminTutupTgl" type="date">
+          </label>
+          <label class="field">Jam (WITA)
+            <input id="adminTutupJam" type="time" value="00:00">
+          </label>
+        </div>
+        <p class="err" id="adminTutupError" hidden></p>
+        <div class="edit-actions">
+          <button class="btn" id="adminBukaKirim" type="button">Buka pengiriman</button>
+          <button class="btn primary" id="adminTutupSimpan" type="button">Simpan jadwal tutup</button>
+        </div>
+      </section>
+      <section class="admin-guru" aria-labelledby="adminImporTitle">
+        <h3 id="adminImporTitle">Impor daftar guru dari Excel</h3>
+        <p class="hint" id="adminImporStatus"></p>
+        <p class="hint">File Excel seperti <i>Lampiran 2 SK Penulis Kisi-kisi dan Soal</i>: kolom <b>MATA PELAJARAN</b> dan kolom
+          kelas <b>XII / XI / X</b> berisi nama guru. <b>Seluruh daftar guru lama diganti</b> (data bawaan, guru tambahan, dan perubahan).</p>
+        <label class="field">File Excel (.xlsx)
+          <input id="adminImporFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+        </label>
+        <div id="adminImporHasil" hidden>
+          <p class="hint" id="adminImporRingkas"></p>
+          <details class="impor-pratinjau">
+            <summary>Lihat isi file</summary>
+            <ul class="admin-guru-list" id="adminImporList"></ul>
+          </details>
+        </div>
+        <p class="err" id="adminImporError" hidden></p>
+        <button class="btn primary" id="adminImporSimpan" type="button" disabled>Ganti daftar guru dengan file ini</button>
+      </section>
+      <section class="admin-guru" aria-labelledby="adminGuruTitle">
+        <h3 id="adminGuruTitle">Tambah nama guru</h3>
+        <p class="hint">Untuk guru yang belum ada di daftar. Guru dengan beberapa mapel atau kelas ditambahkan satu per satu.</p>
+        <label class="field">Nama guru (lengkap dengan gelar)
+          <input id="adminGuruNama" maxlength="80" autocomplete="off" placeholder="mis. Siti Aminah, S.Pd.">
+        </label>
+        <div class="field-row admin-guru-row">
+          <label class="field">Mata pelajaran
+            <input id="adminGuruMapel" maxlength="80" data-mapel-cari autocomplete="off" placeholder="Ketik atau pilih">
+          </label>
+          <label class="field">Kelas
+            <select id="adminGuruKelas">
+              <option value="">—</option><option>X</option><option>XI</option><option>XII</option>
+            </select>
+          </label>
+        </div>
+        <p class="err" id="adminGuruError" hidden></p>
+        <button class="btn" id="adminGuruTambah" type="button">+ Tambah guru</button>
+      </section>
+      <section class="admin-guru" aria-labelledby="adminDaftarTitle">
+        <h3 id="adminDaftarTitle">Daftar guru</h3>
+        <p class="hint">Klik <b>Edit</b> untuk mengubah nama, mata pelajaran, atau kelas. Perubahan langsung berlaku untuk semua guru.</p>
+        <label class="field">Cari
+          <input id="adminCariGuru" type="search" autocomplete="off" placeholder="Ketik nama guru atau mapel…">
+        </label>
+        <p class="hint admin-guru-count" id="adminGuruCount"></p>
+        <p class="err" id="adminDaftarError" hidden></p>
+        <ul class="admin-guru-list" id="adminGuruList"></ul>
+      </section>
+      <div class="kirim-actions">
+        <button class="btn" id="adminKeluar" type="button">Keluar dari admin</button>
+      </div>
+      </div>
+    </form>
+  </main>
+
+  <dialog id="imgDialog" class="img-dialog">
+    <div class="img-dialog-head">
+      <strong>Tabel sebagai gambar</strong>
+      <button class="icon-btn" id="imgDialogClose" type="button" aria-label="Tutup">✕</button>
+    </div>
+    <p class="hint">Ukuran ini sama dengan tampilan di dokumen RTF (100%).</p>
+    <div id="imgDialogBody"></div>
+  </dialog>
+
+  <script src="js/data-guru.js?v=3.0"></script>
+  <script src="lib/jszip.min.js?v=3.0"></script>
+  <script src="js/impor-guru.js?v=3.0"></script>
+  <script src="js/parser.js?v=3.0"></script>
+  <script src="js/docx-reader.js?v=3.0"></script>
+  <script src="js/rtf-writer.js?v=3.0"></script>
+  <script src="js/table-image.js?v=3.0"></script>
+  <script src="js/drawing-render.js?v=3.0"></script>
+  <script src="js/option-split.js?v=3.0"></script>
+  <script src="lib/WMFJS.bundle.min.js?v=3.0"></script>
+  <script src="lib/EMFJS.bundle.min.js?v=3.0"></script>
+  <script src="js/metafile-image.js?v=3.0"></script>
+  <script src="js/wmf-fallback.js?v=3.0"></script>
+  <script src="js/omml-image.js?v=3.0"></script>
+  <script src="js/symbol-image.js?v=3.0"></script>
+  <script src="js/app.js?v=3.0"></script>
+</body>
+</html>

@@ -1,0 +1,1614 @@
+(function () {
+  'use strict';
+
+  const { Segs, validate, letter, isTable } = ExamParser;
+  const $ = s => document.querySelector(s);
+  const state = { name: '', questions: [], ignored: [], filter: 'all' };
+  let uid = 0;
+  const imgs = new Map();
+
+  const cfg = () => ({
+    optCount: parseInt($('#cfgOpt').value, 10),
+    mcTitle: $('#cfgTitle').value.trim() || 'Multiple choice',
+    fontSize: parseInt($('#cfgSize').value, 10),
+    // Selalu aktif (pilihannya tidak ditampilkan): baris kosong antar soal, tabel jadi gambar,
+    // kompres foto besar, dan gambar kompatibel ExamView (disertai WMF).
+    blankLine: true,
+    tableImages: true,
+    compressPhotos: true,
+    examView: true,
+  });
+  const hasTable = q => q.stem.some(isTable);
+
+  const ICON = {
+    up: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="m12 7-6 6 1.4 1.4 4.6-4.6 4.6 4.6L18 13l-6-6Z"/></svg>',
+    down: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="m12 17 6-6-1.4-1.4-4.6 4.6-4.6-4.6L6 11l6 6Z"/></svg>',
+    add: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>',
+    del: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-3 6h12l-1 12H7L6 9Zm4 2v8h1.6v-8H10Zm2.4 0v8H14v-8h-1.6Z"/></svg>',
+    x: '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg>',
+  };
+
+  // ---------- Muat file ----------
+  function textLines(txt) {
+    return txt.replace(/^﻿/, '').split(/\r?\n/).map(t => ({ segs: [{ t }], auto: null }));
+  }
+
+  async function loadFile(file) {
+    hideError();
+    try {
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+      let lines;
+      if (ext === 'docx') lines = await DocxReader.read(await file.arrayBuffer());
+      else if (ext === 'txt') lines = textLines(await file.text());
+      else if (ext === 'doc') throw new Error('File .doc (Word 97–2003) belum didukung. Buka file di Word, lalu Simpan Sebagai → Dokumen Word (.docx).');
+      else if (ext === 'rtf') throw new Error('Untuk file .rtf, buka di Word lalu Simpan Sebagai .docx, kemudian unggah lagi.');
+      else throw new Error('Format file tidak dikenali. Gunakan .docx.');
+      await processLines(lines, file.name, file);
+    } catch (e) {
+      console.error(e);
+      showError(e.message || 'Gagal membaca file.');
+    }
+  }
+
+  /** Soal PG tanpa opsi yang diakhiri satu gambar daftar opsi (A. … E.) -> gambar dipotong per opsi. */
+  async function splitOptionImages(questions, optCount) {
+    for (const q of questions) {
+      if (q.type !== 'mc' || q.options.length || !q.stem.length) continue;
+      const last = q.stem[q.stem.length - 1];
+      if (isTable(last)) continue;
+      const imgs = last.filter(s => s.img);
+      if (imgs.length !== 1 || last.some(s => !s.img && /\S/.test(s.t))) continue;
+      let res = null;
+      try { res = await OptionSplit.split(imgs[0].img, optCount); } catch (e) { console.error(e); }
+      if (!res) continue;
+      q.stem.pop();
+      if (res.stem) q.stem.push([{ img: res.stem }]);
+      q.options = res.options.map(img => [{ img }]);
+      q.notes.push(res.stem ? 'Soal & opsi dipisah dari satu gambar — mohon dicek' : 'Opsi dipotong dari gambar daftar opsi — mohon dicek');
+    }
+  }
+
+  /** Opsi berupa tabel kecil (judul kolom + baris opsi) dari parser -> gambar PNG. */
+  async function renderOptionTables(questions) {
+    for (const q of questions) {
+      let done = false;
+      for (const o of q.options) {
+        for (let k = 0; k < o.length; k++) {
+          const s = o[k];
+          if (!s.img || s.img.type !== 'table') continue;
+          try { o[k] = { img: await TableImage.render(s.img.table) }; done = true; } catch (e) { console.error(e); }
+        }
+      }
+      if (done) q.notes.push('Opsi diambil dari tabel (judul kolom + baris opsi) sebagai gambar');
+    }
+  }
+
+  // srcFile: file Word asli yang diunggah guru (ikut dikirim dalam .zip saat Kirim); null untuk teks tempelan.
+  async function processLines(lines, name, srcFile = null) {
+    const res = ExamParser.parse(lines, { optCount: cfg().optCount });
+    // Aplikasi khusus pilihan ganda: soal di bagian Essay/Uraian tidak diekspor, cukup ditampilkan
+    // di "Teks di luar soal".
+    const essays = res.questions.filter(q => q.type !== 'mc');
+    res.questions = res.questions.filter(q => q.type === 'mc');
+    res.ignored = res.ignored.concat(essays.map(q => 'Essay (tidak diekspor): ' +
+      q.stem.filter(p => !isTable(p)).map(p => Segs.text(p)).join(' ').trim()));
+    if (!res.questions.length) {
+      showError('Tidak ada soal yang terdeteksi. Pastikan setiap soal diawali nomor (mis. "1.") dan opsi diawali huruf (a., b., ...).');
+      return;
+    }
+    await renderOptionTables(res.questions);
+    await splitOptionImages(res.questions, cfg().optCount);
+    state.questions = res.questions.map(q => Object.assign({ id: ++uid }, q));
+    state.ignored = res.ignored;
+    state.name = name;
+    state.srcFile = srcFile;
+    $('#start').hidden = true;
+    $('#work').hidden = false;
+    $('#topActions').hidden = false;
+    $('#fileChip').textContent = name;
+    $('#fileChip').title = name;
+    renderAll();
+    const bad = state.questions.filter(q => validate(q, cfg()).length).length;
+    toast(state.questions.length + ' soal terdeteksi' + (bad ? ' · ' + bad + ' perlu dicek' : '') +
+      (essays.length ? ' · ' + essays.length + ' soal essay tidak dimasukkan' : ''));
+    window.scrollTo(0, 0);
+  }
+
+  function showError(msg) { const e = $('#startError'); e.textContent = msg; e.hidden = false; }
+  function hideError() { $('#startError').hidden = true; }
+
+  // ---------- Segmen <-> HTML ----------
+  const escHtml = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function regImg(img) {
+    if (!img._id) { img._id = 'im' + (++uid); }
+    imgs.set(img._id, img);
+    return img._id;
+  }
+
+  function segsToHtml(segs) {
+    return segs.map(s => {
+      if (s.img) {
+        const id = regImg(s.img);
+        if (s.img.type === 'png' || s.img.type === 'jpeg') {
+          const w = Math.round((s.img.w || 1500) / 15);
+          // Persamaan Word: garis dasarnya disejajarkan dengan teks.
+          const va = s.img.fromMath ? ';vertical-align:-' + Math.round(s.img.depth / 15) + 'px' : '';
+          return '<img data-img="' + id + '" src="data:image/' + s.img.type + ';base64,' + s.img.b64 + '" style="width:' + w + 'px' + va + '" alt="">';
+        }
+        return '<span class="ph" contenteditable="false" data-img="' + id + '">Gambar ' + s.img.type.toUpperCase() + '</span>';
+      }
+      let h = escHtml(s.t);
+      if (s.sub) h = '<sub>' + h + '</sub>';
+      if (s.sup) h = '<sup>' + h + '</sup>';
+      if (s.u) h = '<u>' + h + '</u>';
+      if (s.i) h = '<i>' + h + '</i>';
+      if (s.b) h = '<b>' + h + '</b>';
+      return h;
+    }).join('');
+  }
+
+  const BLOCK = /^(DIV|P|LI|H[1-6]|BLOCKQUOTE|PRE|UL|OL|TABLE|TR)$/;
+  function htmlToParas(rootEl, keepLines) {
+    const paras = [[]];
+    const cur = () => paras[paras.length - 1];
+    const brk = () => { if (cur().length) paras.push([]); };
+    (function walk(node, f) {
+      for (let n = node.firstChild; n; n = n.nextSibling) {
+        if (n.nodeType === 3) {
+          if (n.nodeValue) cur().push(Object.assign({ t: n.nodeValue }, f));
+          continue;
+        }
+        if (n.nodeType !== 1) continue;
+        const tag = n.tagName;
+        const id = n.getAttribute('data-img');
+        if (id && imgs.has(id)) { cur().push({ img: imgs.get(id) }); continue; }
+        if (tag === 'BR') { paras.push([]); continue; }
+        if (tag === 'TABLE') { brk(); paras.push(tableFromHtml(n)); paras.push([]); continue; }
+        const g = Object.assign({}, f);
+        if (tag === 'B' || tag === 'STRONG' || /bold|[6-9]00/.test(n.style.fontWeight)) g.b = true;
+        if (tag === 'I' || tag === 'EM' || n.style.fontStyle === 'italic') g.i = true;
+        if (tag === 'U' || /underline/.test(n.style.textDecoration)) g.u = true;
+        if (tag === 'SUP') g.sup = true;
+        if (tag === 'SUB') g.sub = true;
+        const block = BLOCK.test(tag);
+        if (block) brk();
+        walk(n, g);
+        if (block) brk();
+      }
+    })(rootEl, {});
+    return paras
+      .map(p => (isTable(p) || keepLines === 'raw' ? p : keepLines === 'tabs' ? Segs.tidyTabs(p) : keepLines ? Segs.tidyLines(p) : Segs.tidy(p)))
+      .filter(p => isTable(p) || !Segs.isEmpty(p));
+  }
+
+  // ---------- Tabel <-> HTML ----------
+  function tableHtml(t) {
+    const cols = t.rows.map(row => { let c = 0; return row.map(cell => { const s = c; c += cell.span || 1; return s; }); });
+    let h = '<table class="tbl" data-widths="' + escHtml(JSON.stringify(t.widths || [])) + '"><tbody>';
+    t.rows.forEach((row, r) => {
+      h += '<tr>';
+      row.forEach((cell, i) => {
+        if (cell.vm === 'cont') return;
+        let rs = 1;
+        if (cell.vm === 'restart') {
+          for (let k = r + 1; k < t.rows.length; k++) {
+            const j = cols[k].indexOf(cols[r][i]);
+            if (j < 0 || t.rows[k][j].vm !== 'cont') break;
+            rs++;
+          }
+        }
+        h += '<td' + (cell.span > 1 ? ' colspan="' + cell.span + '"' : '') + (rs > 1 ? ' rowspan="' + rs + '"' : '') + '>' +
+          (cell.paras.length ? cell.paras.map(p => '<div>' + (segsToHtml(p) || '<br>') + '</div>').join('') : '<br>') + '</td>';
+      });
+      h += '</tr>';
+    });
+    return h + '</tbody></table>';
+  }
+
+  function tableFromHtml(el) {
+    let widths = [];
+    try { widths = JSON.parse(el.getAttribute('data-widths') || '[]'); } catch (e) { widths = []; }
+    const rows = [];
+    const pending = [], pendingSpan = [];
+    for (const tr of Array.from(el.rows)) {
+      const row = [];
+      const cells = Array.from(tr.cells);
+      let col = 0, ci = 0;
+      for (;;) {
+        if (pending[col] > 0) {
+          row.push({ paras: [], span: pendingSpan[col], vm: 'cont' });
+          pending[col]--;
+          col += pendingSpan[col];
+          continue;
+        }
+        if (ci >= cells.length) break;
+        const td = cells[ci++];
+        const span = td.colSpan || 1, rs = td.rowSpan || 1;
+        row.push({ paras: htmlToParas(td).filter(p => !isTable(p)), span, vm: rs > 1 ? 'restart' : null });
+        if (rs > 1) { pending[col] = rs - 1; pendingSpan[col] = span; }
+        col += span;
+      }
+      if (row.length) rows.push(row);
+    }
+    return { table: { rows, widths } };
+  }
+
+  // ---------- Render ----------
+  function numbers() {
+    const c = { mc: 0, essay: 0 }, map = new Map();
+    for (const q of state.questions) map.set(q.id, ++c[q.type]);
+    return map;
+  }
+
+  function renderAll() {
+    const box = $('#questions');
+    box.innerHTML = '';
+    const nums = numbers();
+    const settings = cfg();
+    // Urutan mengikuti dokumen asli; judul bagian muncul tiap kali jenis soal berganti.
+    let prevType = null;
+    for (const q of state.questions) {
+      if (q.type !== prevType) {
+        const h = document.createElement('div');
+        h.className = 'section-title';
+        h.textContent = q.type === 'mc' ? settings.mcTitle : 'Essay';
+        box.appendChild(h);
+        prevType = q.type;
+      }
+      box.appendChild(card(q, nums.get(q.id), settings));
+    }
+    renderSide();
+    applyFilter();
+  }
+
+  function card(q, n, settings) {
+    const el = document.createElement('article');
+    el.className = 'q';
+    el.dataset.id = q.id;
+    el.id = 'q' + q.id;
+    const stemItems = q.stem.length ? q.stem : [[]];
+    // Jarak tab = label terpanjang (seperti tab stop di RTF), agar kolom nilai di preview juga rata.
+    const tabLabel = Math.max(0, ...stemItems.filter(p => !isTable(p)).map(p => {
+      const t = Segs.text(p);
+      return t.includes('\t') ? t.split('\t')[0].length : 0;
+    }));
+    const tabStyle = tabLabel ? ' style="tab-size:' + (tabLabel + 3) + 'ch"' : '';
+    let stemHtml = stemItems.map(p => (isTable(p) ? tableHtml(p.table) : '<div' + tabStyle + '>' + (segsToHtml(p) || '<br>') + '</div>')).join('');
+    if (isTable(stemItems[stemItems.length - 1])) stemHtml += '<div><br></div>'; // tempat kursor setelah tabel
+    let body = '<div class="q-head">' +
+      '<span class="q-num">' + n + '.</span>' +
+      '<div class="q-tools">' +
+      '<button class="icon-btn" data-act="up" title="Naikkan">' + ICON.up + '</button>' +
+      '<button class="icon-btn" data-act="down" title="Turunkan">' + ICON.down + '</button>' +
+      '<button class="icon-btn" data-act="addq" title="Sisipkan soal di bawah">' + ICON.add + '</button>' +
+      '<button class="icon-btn del" data-act="del" title="Hapus soal">' + ICON.del + '</button>' +
+      '</div></div>' +
+      '<div class="edit stem" contenteditable="true" data-field="stem" aria-label="Teks soal">' + stemHtml + '</div>';
+    body += '<ol class="opts">' + q.options.map((o, i) => {
+      const L = letter(i);
+      return '<li class="opt"><button class="key' + (q.answer === L ? ' on' : '') + '" data-act="key" data-i="' + i + '" title="Jadikan kunci">' + L.toLowerCase() + '</button>' +
+        '<div class="edit' + (/\n/.test(Segs.text(o)) ? ' multi' : '') + '" contenteditable="true" data-field="opt" data-i="' + i + '" aria-label="Opsi ' + L + '">' + segsToHtml(o) + '</div>' +
+        '<button class="icon-btn del" data-act="rmopt" data-i="' + i + '" title="Hapus opsi">' + ICON.x + '</button></li>';
+    }).join('') + '</ol>' +
+      '<div class="q-foot"><button class="link-btn" data-act="addopt">+ Opsi</button>' +
+      '<span class="ans">ANS: <b>' + (q.answer || '—') + '</b></span>' + tableImgBtn(q, settings) + '</div>' +
+      '<div class="badges"></div>';
+    el.innerHTML = body;
+    paintBadges(el, q, settings);
+    return el;
+  }
+
+  function tableImgBtn(q, settings) {
+    return hasTable(q) && settings.tableImages
+      ? '<button class="link-btn" data-act="tblimg">Lihat tabel sebagai gambar</button>' : '';
+  }
+
+  function paintBadges(el, q, settings) {
+    const issues = validate(q, settings);
+    const notes = q.notes.slice();
+    if (hasTable(q) && settings.tableImages) notes.push('Tabel diekspor sebagai gambar');
+    el.classList.toggle('has-issue', issues.length > 0);
+    el.querySelector('.badges').innerHTML =
+      issues.map(t => '<span class="badge warn">' + escHtml(t) + '</span>').join('') +
+      notes.map(t => '<span class="badge info">' + escHtml(t) + '</span>').join('');
+    const ans = el.querySelector('.ans b');
+    if (ans) ans.textContent = q.answer || '—';
+  }
+
+  function renderSide() {
+    const settings = cfg();
+    const nums = numbers();
+    const bad = [];
+    for (const q of state.questions) {
+      const iss = validate(q, settings);
+      if (iss.length) bad.push({ q, iss });
+    }
+    const total = state.questions.length;
+    $('#stats').innerHTML =
+      '<div class="stat"><b>' + total + '</b><span>Soal</span></div>' +
+      '<div class="stat ok"><b>' + (total - bad.length) + '</b><span>Siap</span></div>' +
+      '<div class="stat' + (bad.length ? ' warn' : '') + '"><b>' + bad.length + '</b><span>Perlu dicek</span></div>';
+    $('#issueList').innerHTML = bad.length
+      ? bad.map(({ q, iss }) => '<button data-go="' + q.id + '"><b>' + 'No. ' + nums.get(q.id) + '</b>' + escHtml(iss.join(' · ')) + '</button>').join('')
+      : '<span class="none">Semua soal sudah lengkap.</span>';
+    // Ekspor & Kirim hanya bisa bila tidak ada soal yang "Perlu dicek".
+    const block = bad.length > 0 || !state.questions.length;
+    for (const id of ['#btnExport', '#btnKirim']) {
+      const btn = $(id);
+      btn.disabled = block;
+      btn.title = bad.length ? bad.length + ' soal masih perlu dicek — perbaiki dulu (lihat panel "Perlu dicek")' : '';
+    }
+    $('#blockHint').hidden = !bad.length;
+    $('#blockHint').textContent = bad.length + ' soal perlu dicek';
+    $('#ignoredCount').textContent = state.ignored.length;
+    $('#ignoredList').innerHTML = state.ignored.map(t => '<li>' + escHtml(t) + '</li>').join('') || '<li>Tidak ada</li>';
+  }
+
+  function applyFilter() {
+    const only = state.filter === 'issues';
+    document.querySelectorAll('.q').forEach(el => {
+      el.hidden = only && !el.classList.contains('has-issue');
+    });
+  }
+
+  let sideTimer = null;
+  function refreshMeta(q) {
+    const el = document.getElementById('q' + q.id);
+    if (el) paintBadges(el, q, cfg());
+    clearTimeout(sideTimer);
+    sideTimer = setTimeout(renderSide, 150);
+  }
+
+  // ---------- Interaksi ----------
+  const find = id => state.questions.find(q => q.id === id);
+  const qOf = el => { const c = el.closest('.q'); return c ? find(parseInt(c.dataset.id, 10)) : null; };
+
+  function onAction(btn) {
+    const q = qOf(btn);
+    if (!q) return;
+    const act = btn.dataset.act;
+    const i = parseInt(btn.dataset.i, 10);
+    const list = state.questions;
+    const idx = list.indexOf(q);
+    if (act === 'key') {
+      q.answer = q.answer === letter(i) ? null : letter(i);
+      const el = btn.closest('.q');
+      el.querySelectorAll('.key').forEach((k, j) => k.classList.toggle('on', q.answer === letter(j)));
+      refreshMeta(q);
+      return;
+    }
+    if (act === 'tblimg') { showTableImages(q); return; }
+    if (act === 'up' || act === 'down') {
+      const j = idx + (act === 'up' ? -1 : 1);
+      if (j < 0 || j >= list.length) return;
+      list[idx] = list[j]; list[j] = q;
+    } else if (act === 'del') {
+      if (!confirm('Hapus soal ini?')) return;
+      list.splice(idx, 1);
+    } else if (act === 'addq') {
+      const nq = blankQuestion();
+      list.splice(idx + 1, 0, nq);
+      renderAll();
+      focusStem(nq);
+      return;
+    } else if (act === 'addopt') {
+      q.options.push([]);
+      renderAll();
+      const opts = document.querySelectorAll('#q' + q.id + ' [data-field="opt"]');
+      if (opts.length) opts[opts.length - 1].focus();
+      return;
+    } else if (act === 'rmopt') {
+      const removed = letter(i);
+      q.options.splice(i, 1);
+      if (q.answer) {
+        if (q.answer === removed) q.answer = null;
+        else if (q.answer > removed) q.answer = letter(q.answer.charCodeAt(0) - 66);
+      }
+    }
+    renderAll();
+    const el = document.getElementById('q' + q.id);
+    if (el && (act === 'up' || act === 'down')) el.scrollIntoView({ block: 'nearest' });
+  }
+
+  function blankQuestion() {
+    return {
+      id: ++uid, type: 'mc', srcNum: null, stem: [], notes: [],
+      options: Array.from({ length: cfg().optCount }, () => []),
+      answer: null,
+    };
+  }
+
+  function focusStem(q) {
+    const el = document.querySelector('#q' + q.id + ' .stem');
+    if (el) { el.scrollIntoView({ block: 'center' }); el.focus(); }
+  }
+
+  function onInput(e) {
+    const t = e.target;
+    const q = qOf(t);
+    if (!q) return;
+    const f = t.dataset.field;
+    if (f === 'stem') q.stem = htmlToParas(t, 'tabs');
+    else if (f === 'opt') {
+      const i = parseInt(t.dataset.i, 10);
+      // Opsi berbaris ganda (jurnal debit/kredit): baris baru & tab dipertahankan.
+      // Berbaris ganda bila opsi semula berbaris ganda atau editor kini berisi baris baru (Shift+Enter).
+      const multi = /\n/.test(Segs.text(q.options[i] || [])) || !!t.querySelector('br, div') || /\n/.test(t.textContent);
+      // Baris dirangkai dulu baru dirapikan sekali, agar tab di awal baris kredit tidak terbuang.
+      const paras = htmlToParas(t, multi ? 'raw' : false).filter(p => !isTable(p));
+      const joined = paras.reduce((a, p, k) => a.concat(k ? [{ t: multi ? '\n' : ' ' }] : [], p), []);
+      q.options[i] = multi ? Segs.tidyLines(joined) : Segs.tidy(joined);
+      t.classList.toggle('multi', /\n/.test(Segs.text(q.options[i])));
+    } else return;
+    refreshMeta(q);
+  }
+
+  function onPaste(e) {
+    const t = e.target.closest('.edit');
+    if (!t) return;
+    e.preventDefault();
+    const cd = e.clipboardData;
+    const file = Array.from(cd.files || []).find(f => /^image\/(png|jpeg|gif|bmp|webp)$/.test(f.type));
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const im = new Image();
+        im.onload = () => {
+          let type = file.type === 'image/jpeg' ? 'jpeg' : 'png';
+          let b64 = reader.result.split(',')[1];
+          if (!/^image\/(png|jpeg)$/.test(file.type)) {
+            const c = document.createElement('canvas');
+            c.width = im.naturalWidth; c.height = im.naturalHeight;
+            c.getContext('2d').drawImage(im, 0, 0);
+            b64 = c.toDataURL('image/png').split(',')[1];
+            type = 'png';
+          }
+          const img = { type, b64, pxW: im.naturalWidth, pxH: im.naturalHeight, w: im.naturalWidth * 15, h: im.naturalHeight * 15 };
+          document.execCommand('insertHTML', false, segsToHtml([{ img }]));
+          t.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        im.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+    let text = cd.getData('text/plain') || '';
+    if (t.dataset.field === 'opt') text = text.replace(/\s*\r?\n\s*/g, ' ');
+    document.execCommand('insertText', false, text);
+  }
+
+  // Ganti tabel di dalam soal dengan gambarnya (bila pengaturan aktif).
+  async function withTableImages(questions) {
+    return Promise.all(questions.map(async q => {
+      if (!hasTable(q)) return q;
+      const stem = await Promise.all(q.stem.map(async p => (isTable(p) ? [{ img: await TableImage.render(p.table) }] : p)));
+      return Object.assign({}, q, { stem });
+    }));
+  }
+
+  // Kecilkan foto yang resolusinya jauh di atas ukuran tampilnya (maks ~2x), dan
+  // simpan sebagai JPEG bila jauh lebih kecil. Ukuran tampil (w/h twips) tidak berubah.
+  const MAX_DISPLAY_TW = 8500; // sama dengan batas lebar gambar di RtfWriter
+  const photoCache = new WeakMap();
+  const b64Bytes = b64 => Math.round(b64.length * 3 / 4);
+
+  function pngBitDepth(b64) {
+    const bin = atob(b64.slice(0, 40));
+    return bin.charCodeAt(24);
+  }
+
+  async function compressPhoto(img) {
+    if (!img || (img.type !== 'png' && img.type !== 'jpeg') || !img.b64) return img;
+    if (photoCache.has(img)) return photoCache.get(img);
+    let out = img;
+    try {
+      // PNG < 8 bit = gambar tabel/ilustrasi buatan aplikasi; sudah ringkas.
+      if (img.type === 'png' && pngBitDepth(img.b64) < 8) throw 0;
+      const el = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = rej;
+        im.src = 'data:image/' + img.type + ';base64,' + img.b64;
+      });
+      const pxW = el.naturalWidth, pxH = el.naturalHeight;
+      const dispW = Math.min(img.w || pxW * 15, MAX_DISPLAY_TW) / 15;
+      const scale = Math.min(1, 2 * dispW / pxW);
+      const orig = b64Bytes(img.b64);
+      const resize = scale < 0.8;
+      if (!resize && (img.type === 'jpeg' || orig < 30 * 1024)) throw 0;
+      const tw = Math.max(1, Math.round(pxW * (resize ? scale : 1)));
+      const th = Math.max(1, Math.round(pxH * (resize ? scale : 1)));
+      const c = document.createElement('canvas');
+      c.width = tw; c.height = th;
+      const ctx = c.getContext('2d');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(el, 0, 0, tw, th);
+      const cands = [];
+      if (resize && img.type === 'png') cands.push({ type: 'png', b64: c.toDataURL('image/png').split(',')[1] });
+      // JPEG tidak punya transparansi: ratakan di atas putih (latar halaman).
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, tw, th);
+      const jpeg = { type: 'jpeg', b64: c.toDataURL('image/jpeg', 0.82).split(',')[1] };
+      let best = cands[0] || (resize ? null : { type: img.type, b64: img.b64 });
+      // Gambar garis/diagram tetap PNG kecuali JPEG jauh lebih hemat (foto).
+      if (!best || img.type === 'jpeg' || b64Bytes(jpeg.b64) < 0.75 * b64Bytes(best.b64)) best = jpeg;
+      if (b64Bytes(best.b64) < orig * 0.9) {
+        out = Object.assign({}, img, { type: best.type, b64: best.b64, pxW: tw, pxH: th });
+      }
+    } catch (e) {
+      if (e !== 0) console.error(e);
+    }
+    photoCache.set(img, out);
+    return out;
+  }
+
+  async function withCompressedPhotos(questions) {
+    const segs = async list => Promise.all(list.map(async s => (s.img ? Object.assign({}, s, { img: await compressPhoto(s.img) }) : s)));
+    return Promise.all(questions.map(async q => Object.assign({}, q, {
+      stem: await Promise.all(q.stem.map(p => (isTable(p) ? p : segs(p)))),
+      options: await Promise.all(q.options.map(segs)),
+    })));
+  }
+
+  // ---------- Cadangan WMF untuk ExamView ----------
+  // ExamView hanya membaca gambar WMF; PNG/JPEG ditolak (error -4). RtfWriter menulis WMF ini saja.
+  // Gambar abu-abu: DIB 4-bit hingga 2x ukuran tampil; berwarna (foto): DIB 24-bit di ukuran tampil.
+  const wmfCache = new WeakMap();
+  async function addWmf(img) {
+    if (!img || (img.type !== 'png' && img.type !== 'jpeg') || !img.b64) return img;
+    if (wmfCache.has(img)) return wmfCache.get(img);
+    let out = img;
+    try {
+      const el = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = rej;
+        im.src = 'data:image/' + img.type + ';base64,' + img.b64;
+      });
+      const nw = el.naturalWidth, nh = el.naturalHeight;
+      const dispW = Math.max(1, Math.round((img.w || nw * 15) / 15));
+      const draw = targetW => {
+        const s = Math.min(1, targetW / nw);
+        const w = Math.max(1, Math.round(nw * s)), h = Math.max(1, Math.round(nh * s));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(el, 0, 0, w, h);
+        return { w, h, data: ctx.getImageData(0, 0, w, h).data };
+      };
+      let px = draw(dispW * 2);
+      if (!WmfFallback.isGray(px.data)) px = draw(dispW);
+      out = Object.assign({}, img, { wmf: WmfFallback.toBase64(WmfFallback.fromRgba(px.w, px.h, px.data)) });
+    } catch (e) {
+      console.error('Cadangan WMF gagal dibuat:', e);
+    }
+    wmfCache.set(img, out);
+    return out;
+  }
+
+  async function withWmfFallbacks(questions) {
+    const segs = async list => Promise.all(list.map(async s => (s.img ? Object.assign({}, s, { img: await addWmf(s.img) }) : s)));
+    const item = async p => {
+      if (!isTable(p)) return segs(p);
+      const rows = await Promise.all(p.table.rows.map(row => Promise.all(row.map(async c => Object.assign({}, c, { paras: await Promise.all(c.paras.map(segs)) })))));
+      return { table: Object.assign({}, p.table, { rows }) };
+    };
+    return Promise.all(questions.map(async q => Object.assign({}, q, {
+      stem: await Promise.all(q.stem.map(item)),
+      options: await Promise.all(q.options.map(segs)),
+    })));
+  }
+
+  // ---------- Simbol jadi gambar ----------
+  // Pengimpor ujian mengubah karakter di luar Windows-1252 (⇌ ⅔ ≤ α √, tulisan Arab, ...) menjadi "?".
+  // Deretan karakter seperti itu digambar menjadi PNG kecil yang sejajar dengan teks.
+  async function withSymbolImages(questions, settings) {
+    const splitSeg = async s => {
+      if (s.img || !s.t || Array.from(s.t).every(RtfWriter.isPlain)) return [s];
+      const parts = [];
+      for (const ch of s.t) {
+        const sym = !RtfWriter.isPlain(ch);
+        const last = parts[parts.length - 1];
+        if (last && last.sym === sym) last.t += ch;
+        else parts.push({ t: ch, sym });
+      }
+      // "simbol spasi simbol" (mis. kata-kata Arab) jadi satu gambar agar urutannya tetap.
+      for (let k = 1; k + 1 < parts.length; k++) {
+        if (!parts[k].sym && parts[k - 1].sym && parts[k + 1].sym && /^[  ]+$/.test(parts[k].t)) {
+          parts[k - 1].t += parts[k].t + parts[k + 1].t;
+          parts.splice(k, 2);
+          k--;
+        }
+      }
+      return Promise.all(parts.map(async p => {
+        if (!p.sym) return Object.assign({}, s, { t: p.t });
+        const img = await SymbolImage.render(p.t, { font: settings.font || 'Times New Roman', size: settings.fontSize, b: s.b, i: s.i, sup: s.sup, sub: s.sub });
+        return img ? { img } : Object.assign({}, s, { t: p.t }); // gagal: teks cadangan dari RtfWriter
+      }));
+    };
+    const segs = async list => [].concat(...await Promise.all(list.map(splitSeg)));
+    const item = async p => {
+      if (!isTable(p)) return segs(p);
+      const rows = await Promise.all(p.table.rows.map(row => Promise.all(row.map(async c => Object.assign({}, c, { paras: await Promise.all(c.paras.map(segs)) })))));
+      return { table: Object.assign({}, p.table, { rows }) };
+    };
+    return Promise.all(questions.map(async q => Object.assign({}, q, {
+      stem: await Promise.all(q.stem.map(item)),
+      options: await Promise.all(q.options.map(segs)),
+    })));
+  }
+
+  async function showTableImages(q) {
+    const body = $('#imgDialogBody');
+    body.innerHTML = '';
+    for (const p of q.stem.filter(isTable)) {
+      const img = await TableImage.render(p.table);
+      const kb = Math.round(img.b64.length * 3 / 4 / 1024);
+      const fig = document.createElement('figure');
+      fig.innerHTML = '<img alt="Tabel" style="width:' + Math.round(img.w / 15) + 'px" src="data:image/png;base64,' + img.b64 + '">' +
+        '<figcaption>' + Math.round(img.w / 567 * 10) / 10 + ' × ' + Math.round(img.h / 567 * 10) / 10 + ' cm · ' + kb + ' KB</figcaption>';
+      body.appendChild(fig);
+    }
+    $('#imgDialog').showModal();
+  }
+
+  /** Nama file: Mapel-Kelas-Semester-TahunAjaran.rtf (mis. "Ekonomi-XII-Genap-2026-2027.rtf"). */
+  const metaFileName = m => [m.mapel, m.kelas, m.semester, m.ta + '-' + (Number(m.ta) + 1)]
+    .map(s => String(s).replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim()).join('-') + '.rtf';
+
+  /** RTF hasil akhir (sama untuk Ekspor dan Kirim). */
+  async function buildRtf() {
+    const settings = cfg();
+    let questions = settings.tableImages ? await withTableImages(state.questions) : state.questions;
+    questions = await withSymbolImages(questions, settings);
+    if (settings.compressPhotos) questions = await withCompressedPhotos(questions);
+    if (settings.examView) questions = await withWmfFallbacks(questions);
+    return RtfWriter.build(questions, settings);
+  }
+
+  // RTF mulai dibuat begitu dialog Ekspor/Kirim dibuka (sementara guru mengisi nama, mapel, kelas),
+  // sehingga saat "Ya, kirim" ditekan file biasanya sudah siap. Soal tidak bisa diubah selama dialog terbuka;
+  // hasilnya dibuang saat dialog ditutup.
+  let rtfJob = null;
+  function startRtf() {
+    if (!rtfJob) {
+      const job = buildRtf();
+      rtfJob = job;
+      job.catch(() => { if (rtfJob === job) rtfJob = null; });
+    }
+    return rtfJob;
+  }
+
+  // Body JSON dikompres gzip bila browser mendukung (RTF berupa teks hex, menyusut ±10x).
+  async function jsonBody(obj) {
+    const json = JSON.stringify(obj);
+    if (typeof CompressionStream === 'undefined') return { body: json, headers: { 'Content-Type': 'application/json' } };
+    const body = await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+    return { body, headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' } };
+  }
+
+  async function downloadRtf(fileName, job) {
+    const rtf = await (job || buildRtf());
+    const blob = new Blob([rtf], { type: 'application/rtf' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast('RTF diunduh: ' + fileName);
+  }
+
+  // ---------- Konfirmasi Ekspor / Kirim (guru, mapel, kelas, semester, tahun ajaran) ----------
+  const META_KEY = 'konver-soal:pengirim';
+  // Batas file Word asli yang ikut dikirim (sama dengan batas lampiran per email di server).
+  const ASLI_MAX = 17 * 1048576;
+  const mbText = n => (n / 1048576).toFixed(1).replace('.', ',') + ' MB';
+  // Daftar guru = data bawaan (js/data-guru.js) yang sudah dikoreksi admin + guru tambahan dari admin.
+  // Koreksi & tambahan disimpan di server. Tiap baris menyimpan `asal` (baris aslinya) untuk edit/hapus.
+  // Daftar dasar: hasil impor Excel admin (dari server) bila ada, selain itu js/data-guru.js.
+  let GURU_BAWAAN = (window.DATA_GURU || []).slice();
+  let guruImpor = null; // { namaFile, waktu, jumlah } bila daftar dasar berasal dari impor
+  function setGuruServer(d) {
+    guruTambahan = d.guru || [];
+    guruKoreksi = d.koreksi || [];
+    GURU_BAWAAN = Array.isArray(d.dasar) ? d.dasar : (window.DATA_GURU || []).slice();
+    guruImpor = Array.isArray(d.dasar) ? (d.impor || {}) : null;
+    rebuildGuru();
+  }
+  let guruTambahan = [];
+  let guruKoreksi = []; // [{ asal, jadi }]; jadi null = disembunyikan
+  let GURU = [];
+  let guruNames = [];
+  const sameGuru = (a, b) => a.nama === b.nama && a.mapel === b.mapel && a.kelas === b.kelas;
+  const pickGuru = g => ({ nama: g.nama, mapel: g.mapel, kelas: g.kelas });
+  function rebuildGuru() {
+    const rows = [];
+    GURU_BAWAAN.forEach(b => {
+      const k = guruKoreksi.find(x => sameGuru(x.asal, b));
+      if (k && !k.jadi) return;
+      rows.push(Object.assign(pickGuru(k ? k.jadi : b), { asal: pickGuru(b), sumber: k ? 'diubah' : 'bawaan' }));
+    });
+    guruTambahan.forEach(t => {
+      if (!rows.some(r => sameGuru(r, t))) rows.push(Object.assign(pickGuru(t), { asal: pickGuru(t), sumber: 'tambahan' }));
+    });
+    GURU = rows;
+    guruNames = Array.from(new Set(GURU.map(g => g.nama))).sort((a, b) => a.localeCompare(b, 'id'));
+    mapelNames = Array.from(new Set(GURU.map(g => g.mapel))).sort((a, b) => a.localeCompare(b, 'id'));
+  }
+  let mapelNames = [];
+  rebuildGuru();
+  async function loadGuru() {
+    if (location.protocol === 'file:') return;
+    try {
+      const r = await fetch('api/guru', { cache: 'no-store' });
+      const d = r.ok ? await r.json() : null;
+      if (d && Array.isArray(d.guru)) setGuruServer(d);
+    } catch (e) { /* layanan belum terpasang: pakai data bawaan saja */ }
+  }
+  const fold = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  let metaMode = 'export';
+  let guruIdx = -1;
+
+  function readMeta() {
+    return {
+      nama: $('#kirimNama').value.trim(), mapel: $('#kirimMapel').value, kelas: $('#kirimKelas').value,
+      semester: $('#kirimSemester').value, ta: $('#kirimTA').value,
+    };
+  }
+  function updateFileName() {
+    const m = readMeta();
+    const complete = guruNames.includes(m.nama) && !!(m.mapel && m.kelas && m.semester && m.ta);
+    $('#kirimFileName').textContent = m.mapel && m.kelas && m.semester && m.ta ? metaFileName(m) : '—';
+    // Tombol "Ya, ekspor/kirim" baru aktif bila semua isian lengkap (dan tidak sedang mengirim).
+    const ok = $('#kirimOk');
+    if (!ok.dataset.busy) {
+      const tutup = metaMode === 'kirim' && kirimDitutup();
+      ok.disabled = !complete || tutup;
+      ok.title = tutup ? 'Pengiriman soal sedang ditutup admin'
+        : complete ? '' : 'Lengkapi nama guru, mata pelajaran, kelas, semester, dan tahun ajaran';
+    }
+  }
+
+  function setGuru(nama) {
+    $('#kirimNama').value = nama;
+    closeGuruList();
+    const rows = GURU.filter(g => g.nama === nama);
+    const sel = $('#kirimMapel');
+    const mapels = Array.from(new Set(rows.map(g => g.mapel)));
+    sel.innerHTML = mapels.length
+      ? (mapels.length > 1 ? '<option value="">— pilih mata pelajaran —</option>' : '') +
+        mapels.map(m => '<option>' + escHtml(m) + '</option>').join('')
+      : '<option value="">— pilih nama guru dulu —</option>';
+    sel.disabled = !mapels.length;
+    // Kelas otomatis sesuai data (tetap bisa diganti)
+    const pick = () => {
+      const r = rows.filter(g => g.mapel === sel.value);
+      if (r.length === 1) $('#kirimKelas').value = r[0].kelas;
+      updateFileName();
+    };
+    sel.onchange = pick;
+    pick();
+  }
+
+  function renderGuruList() {
+    const q = fold($('#kirimNama').value);
+    const list = $('#guruList');
+    const hits = guruNames.filter(n => !q || fold(n).includes(q)).slice(0, 50);
+    guruIdx = -1;
+    list.innerHTML = hits.length
+      ? hits.map((n, i) => '<li role="option" data-i="' + i + '" data-nama="' + escHtml(n) + '">' + escHtml(n) + '</li>').join('')
+      : '<li class="empty">Nama tidak ditemukan. Hubungi admin untuk menambahkan.</li>';
+    list.hidden = false;
+    $('#kirimNama').setAttribute('aria-expanded', 'true');
+  }
+  function closeGuruList() { $('#guruList').hidden = true; $('#kirimNama').setAttribute('aria-expanded', 'false'); }
+
+  // ---------- Semester & tahun ajaran yang dikunci admin (disimpan di server) ----------
+  let lockInfo = null; // { kunci, semester, tahunAjaran, adminAktif }
+  async function loadLock() {
+    if (location.protocol === 'file:') return null;
+    try {
+      const r = await fetch('api/pengaturan', { cache: 'no-store' });
+      lockInfo = r.ok ? await r.json() : null;
+    } catch (e) { lockInfo = null; }
+    return lockInfo;
+  }
+  function applyLock() {
+    const s = lockInfo, locked = !!(s && s.kunci);
+    const sem = $('#kirimSemester'), ta = $('#kirimTA');
+    if (locked) {
+      const y = s.tahunAjaran.slice(0, 4);
+      if (!Array.from(ta.options).some(o => o.value === y)) ta.add(new Option(s.tahunAjaran, y));
+      sem.value = s.semester;
+      ta.value = y;
+    }
+    sem.disabled = ta.disabled = locked;
+    $('#lockNote').hidden = !locked;
+    updateFileName();
+  }
+  const lockLabel = s => s.semester + ' ' + s.tahunAjaran;
+
+  // ---------- Tutup pengiriman soal (jadwal dari admin, disimpan di server) ----------
+  // Jam yang diisi admin selalu dibaca sebagai WITA (UTC+8), apa pun zona waktu komputernya.
+  const WITA_MS = 8 * 3600 * 1000;
+  const kirimDitutup = () => !!(lockInfo && lockInfo.tutupKirim && Date.now() >= Date.parse(lockInfo.tutupKirim));
+  function tutupLabel(iso) {
+    const d = new Date(Date.parse(iso) + WITA_MS); // dibaca dengan getUTC* = jam WITA
+    const HARI = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+    const BULAN = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    const p = n => String(n).padStart(2, '0');
+    return HARI[d.getUTCDay()] + ', ' + d.getUTCDate() + ' ' + BULAN[d.getUTCMonth()] + ' ' + d.getUTCFullYear() +
+      ' pukul ' + p(d.getUTCHours()) + '.' + p(d.getUTCMinutes()) + ' WITA';
+  }
+  function showTutupStatus(s) {
+    const iso = s && s.tutupKirim;
+    if (iso) {
+      const w = new Date(Date.parse(iso) + WITA_MS).toISOString();
+      $('#adminTutupTgl').value = w.slice(0, 10);
+      $('#adminTutupJam').value = w.slice(11, 16);
+    } else {
+      $('#adminTutupTgl').value = '';
+      $('#adminTutupJam').value = '00:00';
+    }
+    const st = $('#adminTutupStatus');
+    st.textContent = !iso ? 'Saat ini terbuka: guru bisa mengirim soal.'
+      : Date.now() >= Date.parse(iso) ? 'Saat ini DITUTUP sejak ' + tutupLabel(iso) + '. Guru tidak bisa mengirim soal.'
+      : 'Terbuka, dijadwalkan tutup ' + tutupLabel(iso) + '.';
+    st.classList.toggle('warn-text', !!iso);
+    $('#adminBukaKirim').disabled = !iso;
+  }
+  async function saveTutup(buka) {
+    const errEl = $('#adminTutupError');
+    errEl.hidden = true;
+    const err = msg => { errEl.textContent = msg; errEl.hidden = false; };
+    let mulai = null;
+    if (!buka) {
+      const tgl = $('#adminTutupTgl').value, jam = $('#adminTutupJam').value || '00:00';
+      if (!tgl) { $('#adminTutupTgl').focus(); return err('Pilih tanggal tutup.'); }
+      mulai = tgl + 'T' + jam + ':00+08:00';
+      if (!Number.isFinite(Date.parse(mulai))) return err('Tanggal atau jam tidak valid.');
+      if (Date.parse(mulai) <= Date.now() && !confirm('Waktu itu sudah lewat, jadi pengiriman langsung ditutup sekarang. Lanjutkan?')) return;
+    }
+    const btn = buka ? $('#adminBukaKirim') : $('#adminTutupSimpan');
+    btn.disabled = true;
+    try {
+      const r = await fetch('api/pengaturan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sandi: $('#adminSandi').value, aksi: 'tutupKirim', mulai }),
+      });
+      let d = {};
+      try { d = await r.json(); } catch (x) { d = {}; }
+      if (!r.ok || !d.ok) throw new Error(d.pesan || 'Gagal menyimpan (kode ' + r.status + ').');
+      lockInfo = Object.assign({}, lockInfo, d);
+      showTutupStatus(d);
+      toast(d.tutupKirim ? 'Pengiriman ditutup mulai ' + tutupLabel(d.tutupKirim) : 'Pengiriman soal dibuka lagi');
+    } catch (x) {
+      err(x.message);
+    } finally {
+      btn.disabled = false;
+      showTutupStatus(lockInfo);
+    }
+  }
+  // Dialog Kirim: beri tahu guru bila pengiriman sedang ditutup.
+  function applyTutup() {
+    if (metaMode !== 'kirim') return;
+    const tutup = kirimDitutup();
+    if (tutup) {
+      $('#kirimError').textContent = 'Pengiriman soal sudah ditutup sejak ' + tutupLabel(lockInfo.tutupKirim) +
+        '. Hubungi admin bila perlu dibuka lagi. Anda masih bisa memakai Ekspor RTF.';
+      $('#kirimError').hidden = false;
+    }
+    updateFileName();
+  }
+
+  // Pengaturan admin = halaman sendiri (alamat #admin, dibuka di tab baru dari tautan "Pengaturan admin").
+  // Dibuka dua langkah: (1) kata sandi dicek server, (2) baru menu admin tampil.
+  // Sandi tetap disimpan di kolomnya (tersembunyi) selama halaman admin terbuka, untuk menyimpan perubahan.
+  const JUDUL_APP = document.title;
+  function routeAdmin() {
+    const admin = location.hash === '#admin';
+    document.body.classList.toggle('mode-admin', admin);
+    $('#adminPage').hidden = !admin;
+    document.title = admin ? 'Pengaturan admin – ' + JUDUL_APP : JUDUL_APP;
+    if (admin) openAdmin();
+    else { $('#adminSandi').value = ''; $('#adminMenu').hidden = true; }
+  }
+  function openAdmin() {
+    $('#adminSandi').value = '';
+    $('#adminLogin').hidden = false;
+    $('#adminMenu').hidden = true;
+    $('#adminLoginError').hidden = true;
+    $('#adminLoginInfo').textContent = 'Masukkan kata sandi admin untuk membuka pengaturan.';
+    $('#adminMasuk').disabled = false;
+    window.scrollTo(0, 0);
+    $('#adminSandi').focus();
+    const tutup = msg => { $('#adminLoginInfo').textContent = msg; $('#adminMasuk').disabled = true; };
+    if (location.protocol === 'file:') return tutup('Pengaturan admin hanya bisa dipakai bila aplikasi dibuka dari server sekolah.');
+    loadLock().then(s => {
+      if (!s) return tutup('Layanan pengaturan belum terpasang di server.');
+      if (!s.adminAktif) return tutup('Kata sandi admin belum diatur di server. Jalankan: sudo bash /opt/konver-soal/deploy/install.sh --update --admin');
+    });
+  }
+  function showLockStatus(s) {
+    $('#adminKunci').checked = !!s.kunci;
+    $('#adminSemester').value = s.kunci ? s.semester : '';
+    $('#adminTA').value = s.kunci ? s.tahunAjaran : '';
+    syncAdminFields();
+    $('#adminStatus').textContent = s.kunci
+      ? 'Saat ini dikunci: ' + lockLabel(s) + '.'
+      : 'Saat ini tidak dikunci: guru memilih semester dan tahun ajaran sendiri.';
+  }
+  async function loginAdmin(e) {
+    e.preventDefault();
+    if (!$('#adminMenu').hidden) return; // Enter di dalam menu tidak mengirim ulang sandi
+    const err = msg => { $('#adminLoginError').textContent = msg; $('#adminLoginError').hidden = false; };
+    $('#adminLoginError').hidden = true;
+    if (!$('#adminSandi').value) { $('#adminSandi').focus(); return err('Masukkan kata sandi admin.'); }
+    const btn = $('#adminMasuk');
+    btn.disabled = true;
+    btn.textContent = 'Memeriksa…';
+    try {
+      const r = await fetch('api/pengaturan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sandi: $('#adminSandi').value, cekSandi: true }),
+      });
+      let d = {};
+      try { d = await r.json(); } catch (x) { d = {}; }
+      if (!r.ok || !d.ok) throw new Error(d.pesan || 'Gagal memeriksa kata sandi (kode ' + r.status + ').');
+      // Sandi benar: tampilkan menu admin.
+      lockInfo = Object.assign({}, lockInfo, d);
+      showLockStatus(d);
+      showTutupStatus(d);
+      $('#adminError').hidden = $('#adminGuruError').hidden = $('#adminDaftarError').hidden = $('#adminTutupError').hidden = true;
+      guruEdit = null;
+      $('#adminCariGuru').value = '';
+      renderAdminGuru();
+      resetImpor();
+      loadGuru().then(() => { renderAdminGuru(); showImporStatus(); });
+      $('#adminLogin').hidden = true;
+      $('#adminMenu').hidden = false;
+      window.scrollTo(0, 0);
+      $('#adminKunci').focus();
+    } catch (x) {
+      err(x.message);
+      $('#adminSandi').select();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Masuk';
+    }
+  }
+  // ---------- Admin: tambah / edit / hapus nama guru ----------
+  let guruEdit = null; // asal baris yang sedang diedit
+  const asalKey = g => JSON.stringify(pickGuru(g.asal || g));
+  const LABEL_SUMBER = { tambahan: 'Tambahan', diubah: 'Diubah' };
+  function renderAdminGuru() {
+    const q = fold($('#adminCariGuru').value || '');
+    const semua = GURU.slice().sort((a, b) => a.nama.localeCompare(b.nama, 'id') || a.mapel.localeCompare(b.mapel, 'id'));
+    const hits = semua.filter(g => !q || fold(g.nama + ' ' + g.mapel + ' ' + g.kelas).includes(q));
+    const shown = hits.slice(0, 100);
+    $('#adminGuruCount').textContent = q
+      ? hits.length + ' dari ' + semua.length + ' baris cocok' + (hits.length > shown.length ? ' (100 pertama ditampilkan)' : '')
+      : semua.length + ' baris guru' + (semua.length > shown.length ? '. Ketik di kotak cari untuk menemukan guru lain.' : '');
+    $('#adminGuruList').innerHTML = shown.map(g => {
+      const key = escHtml(asalKey(g));
+      if (guruEdit && asalKey(g) === guruEdit) {
+        const lain = GURU.filter(x => x.nama === g.nama && !sameGuru(x, g)).length;
+        return '<li class="editing" data-key="' + key + '">' +
+          '<label class="field">Nama guru<input data-e="nama" maxlength="80" value="' + escHtml(g.nama) + '"></label>' +
+          '<div class="field-row admin-guru-row">' +
+            '<label class="field">Mata pelajaran<input data-e="mapel" data-mapel-cari maxlength="80" autocomplete="off" value="' + escHtml(g.mapel) + '"></label>' +
+            '<label class="field">Kelas<select data-e="kelas">' + ['X', 'XI', 'XII'].map(k =>
+              '<option' + (k === g.kelas ? ' selected' : '') + '>' + k + '</option>').join('') + '</select></label>' +
+          '</div>' +
+          (lain ? '<label class="check"><input type="checkbox" data-e="semua" checked> Ganti nama juga di ' + lain +
+            ' mapel/kelas lain milik guru ini</label>' : '') +
+          '<div class="edit-actions"><button class="btn" type="button" data-g="batal">Batal</button>' +
+          '<button class="btn primary" type="button" data-g="simpan">Simpan perubahan</button></div></li>';
+      }
+      const tag = LABEL_SUMBER[g.sumber] ? ' <em class="tag">' + LABEL_SUMBER[g.sumber] + '</em>' : '';
+      return '<li data-key="' + key + '"><span>' + escHtml(g.nama) + tag +
+        '<small>' + escHtml(g.mapel) + ' · Kelas ' + escHtml(g.kelas) + '</small></span>' +
+        (g.sumber === 'diubah' ? '<button class="link-btn muted" type="button" data-g="asli" title="Kembalikan ke data asli: ' +
+          escHtml(g.asal.nama + ' — ' + g.asal.mapel + ' · Kelas ' + g.asal.kelas) + '">Kembalikan</button>' : '') +
+        '<button class="link-btn" type="button" data-g="edit">Edit</button>' +
+        '<button class="link-btn danger" type="button" data-g="hapus">Hapus</button></li>';
+    }).join('');
+    const first = $('#adminGuruList li.editing input');
+    if (first && document.activeElement && !document.activeElement.closest('#adminGuruList li.editing')) first.focus();
+  }
+  async function guruRequest(aksi, data) {
+    $('#adminGuruError').hidden = $('#adminDaftarError').hidden = true;
+    if (location.protocol === 'file:') throw new Error('Mengubah daftar guru hanya bisa bila aplikasi dibuka dari server sekolah.');
+    if (!$('#adminSandi').value) { $('#adminSandi').focus(); throw new Error('Masukkan kata sandi admin dulu (kolom paling atas).'); }
+    const r = await fetch('api/guru', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ sandi: $('#adminSandi').value, aksi }, data)),
+    });
+    let d = {};
+    try { d = await r.json(); } catch (x) { d = {}; }
+    if (!r.ok || !d.ok) {
+      throw new Error(d.pesan || (r.status === 404 || r.status === 405
+        ? 'Layanan daftar guru belum terpasang di server. Jalankan install.sh --update.' : 'Gagal menyimpan (kode ' + r.status + ').'));
+    }
+    setGuruServer(d);
+    renderAdminGuru();
+  }
+  const guruErr = msg => { $('#adminDaftarError').textContent = msg; $('#adminDaftarError').hidden = false; };
+  const guruLabel = g => g.nama + ' (' + g.mapel + ', kelas ' + g.kelas + ')';
+  async function simpanEditGuru(li, g) {
+    const val = k => li.querySelector('[data-e="' + k + '"]');
+    const baru = {
+      nama: val('nama').value.replace(/\s+/g, ' ').trim(),
+      mapel: val('mapel').value.replace(/\s+/g, ' ').trim(),
+      kelas: val('kelas').value,
+    };
+    if (!baru.nama) { val('nama').focus(); return guruErr('Nama guru tidak boleh kosong.'); }
+    if (!baru.mapel) { val('mapel').focus(); return guruErr('Mata pelajaran tidak boleh kosong.'); }
+    const perubahan = [{ asal: g.asal, jadi: baru }];
+    // Ganti nama di baris lain milik guru yang sama (mapel/kelas lain) bila dicentang.
+    const semua = val('semua');
+    if (semua && semua.checked && baru.nama !== g.nama) {
+      GURU.filter(x => x.nama === g.nama && !sameGuru(x, g))
+        .forEach(x => perubahan.push({ asal: x.asal, jadi: { nama: baru.nama, mapel: x.mapel, kelas: x.kelas } }));
+    }
+    const sisa = GURU.filter(x => !perubahan.some(p => sameGuru(p.asal, x.asal)));
+    if (perubahan.some(p => sisa.some(x => sameGuru(x, p.jadi)))) {
+      return guruErr('Sudah ada guru dengan nama, mapel, dan kelas yang sama.');
+    }
+    if (perubahan.length === 1 && sameGuru(baru, g)) { guruEdit = null; return renderAdminGuru(); }
+    li.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    try {
+      await guruRequest('ubah', { perubahan });
+      guruEdit = null;
+      renderAdminGuru();
+      toast('Disimpan: ' + guruLabel(baru) + (perubahan.length > 1 ? ' + ' + (perubahan.length - 1) + ' baris lain' : ''));
+    } catch (x) {
+      guruErr(x.message);
+      li.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    }
+  }
+  async function onAdminGuruClick(e) {
+    const b = e.target.closest('[data-g]');
+    if (!b) return;
+    const li = b.closest('li');
+    const g = GURU.find(x => asalKey(x) === li.dataset.key);
+    if (!g) return;
+    $('#adminDaftarError').hidden = true;
+    const act = b.dataset.g;
+    if (act === 'edit') { guruEdit = asalKey(g); return renderAdminGuru(); }
+    if (act === 'batal') { guruEdit = null; return renderAdminGuru(); }
+    if (act === 'simpan') return simpanEditGuru(li, g);
+    if (act === 'asli') {
+      if (GURU.some(x => !sameGuru(x.asal, g.asal) && sameGuru(x, g.asal))) return guruErr('Data asli bentrok dengan guru lain yang sudah ada.');
+      b.disabled = true;
+      try { await guruRequest('ubah', { perubahan: [{ asal: g.asal, jadi: g.asal }] }); toast('Dikembalikan: ' + guruLabel(g.asal)); }
+      catch (x) { guruErr(x.message); b.disabled = false; }
+      return;
+    }
+    if (act === 'hapus') {
+      if (!confirm('Hapus ' + guruLabel(g) + ' dari daftar guru?')) return;
+      b.disabled = true;
+      try { await guruRequest('hapus', { asal: g.asal }); toast('Dihapus: ' + guruLabel(g)); }
+      catch (x) { guruErr(x.message); b.disabled = false; }
+    }
+  }
+  // ---------- Admin: impor daftar guru dari Excel (mengganti seluruh daftar lama) ----------
+  let imporData = null; // { daftar, sheet, mapel, guru, namaFile }
+  function showImporStatus() {
+    const tgl = guruImpor && guruImpor.waktu
+      ? new Date(guruImpor.waktu).toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short' }) : '';
+    $('#adminImporStatus').textContent = guruImpor
+      ? 'Daftar guru saat ini dari impor "' + (guruImpor.namaFile || 'file Excel') + '"' + (tgl ? ' (' + tgl + ')' : '') +
+        ', ' + GURU_BAWAAN.length + ' baris.'
+      : 'Daftar guru saat ini: data bawaan aplikasi (' + GURU_BAWAAN.length + ' baris).';
+  }
+  function resetImpor() {
+    imporData = null;
+    $('#adminImporFile').value = '';
+    $('#adminImporHasil').hidden = true;
+    $('#adminImporError').hidden = true;
+    $('#adminImporSimpan').disabled = true;
+    showImporStatus();
+  }
+  async function pilihFileImpor() {
+    const f = $('#adminImporFile').files[0];
+    imporData = null;
+    $('#adminImporHasil').hidden = true;
+    $('#adminImporError').hidden = true;
+    $('#adminImporSimpan').disabled = true;
+    if (!f) return;
+    try {
+      if (!/\.xlsx$/i.test(f.name)) throw new Error('Pilih file Excel .xlsx (file .xls lama: simpan dulu sebagai .xlsx).');
+      const hasil = ImporGuru.ambilGuru(await ImporGuru.bacaXlsx(f));
+      imporData = Object.assign(hasil, { namaFile: f.name });
+      $('#adminImporRingkas').textContent = 'Ditemukan ' + hasil.daftar.length + ' baris (' + hasil.guru + ' guru, ' + hasil.mapel +
+        ' mata pelajaran) di sheet "' + hasil.sheet + '". Daftar lama (' + GURU.length + ' baris) akan dihapus.';
+      const urut = hasil.daftar.slice().sort((a, b) => a.mapel.localeCompare(b.mapel, 'id') || b.kelas.length - a.kelas.length);
+      $('#adminImporList').innerHTML = urut.map(g => '<li><span>' + escHtml(g.nama) + '<small>' + escHtml(g.mapel) +
+        ' · Kelas ' + escHtml(g.kelas) + '</small></span></li>').join('');
+      $('#adminImporHasil').hidden = false;
+      $('#adminImporSimpan').disabled = false;
+    } catch (x) {
+      $('#adminImporError').textContent = x.message;
+      $('#adminImporError').hidden = false;
+    }
+  }
+  async function simpanImpor() {
+    if (!imporData) return;
+    if (!confirm('Ganti seluruh daftar guru (' + GURU.length + ' baris) dengan ' + imporData.daftar.length +
+      ' baris dari "' + imporData.namaFile + '"?\n\nData guru lama, termasuk guru tambahan dan hasil edit, akan dihapus.')) return;
+    const btn = $('#adminImporSimpan');
+    btn.disabled = true;
+    try {
+      await guruRequest('impor', { daftar: imporData.daftar.map(pickGuru), namaFile: imporData.namaFile });
+      guruEdit = null;
+      $('#adminCariGuru').value = '';
+      renderAdminGuru();
+      toast('Daftar guru diganti: ' + GURU.length + ' baris dari ' + imporData.namaFile);
+      resetImpor();
+    } catch (x) {
+      $('#adminImporError').textContent = x.message;
+      $('#adminImporError').hidden = false;
+      btn.disabled = false;
+    }
+  }
+
+  async function tambahGuru() {
+    const err = msg => { $('#adminGuruError').textContent = msg; $('#adminGuruError').hidden = false; };
+    const g = {
+      nama: $('#adminGuruNama').value.replace(/\s+/g, ' ').trim(),
+      mapel: $('#adminGuruMapel').value.replace(/\s+/g, ' ').trim(),
+      kelas: $('#adminGuruKelas').value,
+    };
+    // Sebutkan kolom yang masih kosong dan arahkan kursor ke sana.
+    const kosong = [['nama', 'nama guru', '#adminGuruNama'], ['mapel', 'mata pelajaran', '#adminGuruMapel'], ['kelas', 'kelas', '#adminGuruKelas']]
+      .filter(([k]) => !g[k]);
+    if (kosong.length) {
+      $(kosong[0][2]).focus();
+      const daftar = kosong.map(k => k[1]);
+      const teks = daftar.length > 1 ? daftar.slice(0, -1).join(', ') + ' dan ' + daftar[daftar.length - 1] : daftar[0];
+      return err(kosong.length === 1 && kosong[0][0] === 'kelas' ? 'Pilih kelas (X, XI, atau XII).' : 'Belum diisi: ' + teks + '.');
+    }
+    if (GURU.some(x => sameGuru(x, g))) return err('Guru dengan mapel dan kelas ini sudah ada di daftar.');
+    const btn = $('#adminGuruTambah');
+    btn.disabled = true;
+    try {
+      await guruRequest('tambah', g);
+      $('#adminGuruMapel').value = '';
+      $('#adminGuruKelas').value = '';
+      $('#adminGuruMapel').focus();
+      toast('Ditambahkan: ' + g.nama + ' (' + g.mapel + ', kelas ' + g.kelas + ')');
+    } catch (x) {
+      err(x.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function syncAdminFields() {
+    const on = $('#adminKunci').checked;
+    $('#adminSemester').disabled = $('#adminTA').disabled = !on;
+  }
+  async function saveAdmin() {
+    $('#adminError').hidden = true;
+    const err = msg => { $('#adminError').textContent = msg; $('#adminError').hidden = false; };
+    const kunci = $('#adminKunci').checked, semester = $('#adminSemester').value, tahunAjaran = $('#adminTA').value;
+    if (kunci && (!semester || !tahunAjaran)) return err('Pilih semester dan tahun ajaran yang akan dikunci.');
+    const btn = $('#adminSimpan');
+    btn.disabled = true;
+    try {
+      const r = await fetch('api/pengaturan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sandi: $('#adminSandi').value, kunci, semester, tahunAjaran }),
+      });
+      let d = {};
+      try { d = await r.json(); } catch (x) { d = {}; }
+      if (!r.ok || !d.ok) throw new Error(d.pesan || 'Gagal menyimpan (kode ' + r.status + ').');
+      lockInfo = Object.assign({}, lockInfo, d);
+      showLockStatus(d);
+      toast(d.kunci ? 'Dikunci untuk semua guru: ' + lockLabel(d) : 'Kunci dibuka: guru memilih semester dan tahun ajaran sendiri');
+    } catch (x) {
+      err(x.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function openMeta(mode) {
+    metaMode = mode;
+    const settings = cfg();
+    const bad = state.questions.filter(q => validate(q, settings).length).length;
+    if (bad) { toast(bad + ' soal masih perlu dicek. Perbaiki dulu sebelum ' + (mode === 'kirim' ? 'mengirim.' : 'mengekspor.')); return; }
+    $('#kirimInfo').textContent = state.questions.length + ' soal dari "' + state.name + '"' +
+      (bad ? ' — ' + bad + ' soal masih ditandai "Perlu dicek".' : '.');
+    $('#kirimInfo').classList.toggle('warn-text', bad > 0);
+    $('#kirimTujuanRow').hidden = mode !== 'kirim';
+    // Beri tahu guru bila file Word aslinya tidak bisa ikut dikirim.
+    const asliNote = mode !== 'kirim' ? ''
+      : !state.srcFile ? 'Soal ditempel sebagai teks: hanya file RTF yang dikirim.'
+      : state.srcFile.size > ASLI_MAX ? 'File Word asli (' + mbText(state.srcFile.size) + ') terlalu besar untuk email (maks. ' +
+        mbText(ASLI_MAX) + '), jadi hanya file RTF yang dikirim. Kirim file aslinya lewat cara lain bila diperlukan.'
+      : '';
+    $('#kirimAsliNote').textContent = asliNote;
+    $('#kirimAsliNote').hidden = !asliNote;
+    $('#kirimOk').textContent = mode === 'kirim' ? 'Ya, kirim' : 'Ya, ekspor';
+    try {
+      const saved = JSON.parse(localStorage.getItem(META_KEY) || '{}');
+      if (saved.nama && guruNames.includes(saved.nama) && !$('#kirimNama').value) {
+        setGuru(saved.nama);
+        if (saved.mapel && Array.from($('#kirimMapel').options).some(o => o.value === saved.mapel)) $('#kirimMapel').value = saved.mapel;
+      }
+      if (saved.kelas && !$('#kirimKelas').value) $('#kirimKelas').value = saved.kelas;
+      if (saved.semester && !$('#kirimSemester').value) $('#kirimSemester').value = saved.semester;
+      if (saved.ta && !$('#kirimTA').value) $('#kirimTA').value = saved.ta;
+    } catch (e) { /* penyimpanan lokal tidak tersedia */ }
+    // Nilai yang dikunci admin menimpa pilihan tersimpan; diperbarui lagi dari server saat dialog terbuka.
+    $('#kirimError').hidden = true;
+    applyLock();
+    applyTutup();
+    loadLock().then(() => { applyLock(); applyTutup(); });
+    loadGuru();
+    closeGuruList();
+    $('#kirimDialog').showModal();
+    startRtf();
+    if (mode === 'kirim' && location.protocol !== 'file:') {
+      // Alamat tujuan sebenarnya diatur di server; tampilkan yang berlaku.
+      fetch('api/kirim/status').then(r => (r.ok ? r.json() : null)).then(s => {
+        if (s && s.tujuan) $('#kirimTujuan').textContent = s.tujuan;
+        if (s && s.siap === false && !kirimDitutup()) {
+          $('#kirimError').textContent = 'Akun email pengirim belum diatur di server. Hubungi admin.';
+          $('#kirimError').hidden = false;
+        }
+      }).catch(() => {});
+    }
+  }
+
+  async function submitMeta(e) {
+    e.preventDefault();
+    const m = readMeta();
+    const err = msg => { $('#kirimError').textContent = msg; $('#kirimError').hidden = false; };
+    if (!guruNames.includes(m.nama)) return err('Pilih nama guru dari daftar (ketik sebagian nama lalu klik namanya).');
+    if (!m.mapel || !m.kelas || !m.semester || !m.ta) return err('Mata pelajaran, kelas, semester, dan tahun ajaran wajib dipilih.');
+    try { localStorage.setItem(META_KEY, JSON.stringify(m)); } catch (x) { /* abaikan */ }
+    const fileName = metaFileName(m);
+    if (metaMode === 'export') {
+      const job = startRtf();
+      $('#kirimDialog').close();
+      await downloadRtf(fileName, job);
+      return;
+    }
+    if (location.protocol === 'file:') return err('Fitur Kirim hanya bisa dipakai bila aplikasi dibuka dari server sekolah, bukan dari file di komputer.');
+    const { nama, mapel, kelas, semester, ta } = m;
+    const tahunAjaran = ta + '/' + (Number(ta) + 1);
+    const btn = $('#kirimOk');
+    btn.disabled = true;
+    btn.dataset.busy = '1';
+    btn.textContent = 'Menyiapkan file…';
+    try {
+      const rtf = await startRtf();
+      // File besar (banyak gambar) butuh beberapa menit untuk diteruskan server ke email: beri tahu guru.
+      const mb = (rtf.length + (state.srcFile ? state.srcFile.size : 0)) / 1048576;
+      btn.textContent = mb >= 3 ? 'Mengirim ' + mb.toFixed(1).replace('.', ',') + ' MB… bisa beberapa menit' : 'Mengirim…';
+      const settings = cfg();
+      const payload = {
+        nama, mapel, kelas, semester, tahunAjaran, fileName, namaFileAsli: state.name,
+        jumlahSoal: state.questions.length, perluDicek: state.questions.filter(q => validate(q, settings).length).length,
+      };
+      // RTF hasil RtfWriter berupa ASCII murni: kirim sebagai teks (lebih kecil setelah gzip daripada base64).
+      if (/^[\x00-\x7F]*$/.test(rtf)) payload.rtf = rtf;
+      else {
+        let bin = '';
+        for (let i = 0; i < rtf.length; i += 0x8000) {
+          bin += String.fromCharCode.apply(null, Array.from(rtf.slice(i, i + 0x8000), ch => ch.charCodeAt(0) & 0xFF));
+        }
+        payload.rtfBase64 = btoa(bin);
+      }
+      // File Word asli ikut dikirim (server melampirkannya sebagai .zip; bila RTF + file asli terlalu
+      // besar untuk satu email, file asli dikirim di email kedua). Di atas batas email: tidak dikirim,
+      // tetapi ukurannya diberitahukan agar alasannya tertulis di email.
+      if (state.srcFile && state.srcFile.size > ASLI_MAX) payload.asliBesar = state.srcFile.size;
+      else if (state.srcFile) {
+        payload.asliBase64 = await new Promise((ok, no) => {
+          const fr = new FileReader();
+          fr.onload = () => ok(String(fr.result).split(',')[1] || '');
+          fr.onerror = () => no(new Error('File asli tidak bisa dibaca. Unggah ulang file Word-nya.'));
+          fr.readAsDataURL(state.srcFile);
+        });
+      }
+      const res = await fetch('api/kirim', Object.assign({ method: 'POST' }, await jsonBody(payload)));
+      let data = {};
+      try { data = await res.json(); } catch (x) { data = {}; }
+      if (!res.ok || !data.ok) {
+        throw new Error(data.pesan || (res.status === 404 || res.status === 405
+          ? 'Layanan kirim belum terpasang di server.' : 'Gagal mengirim (kode ' + res.status + ').'));
+      }
+      $('#kirimDialog').close();
+      showSent(m, data);
+    } catch (x) {
+      err(x.message || 'Gagal mengirim. Periksa koneksi internet.');
+    } finally {
+      delete btn.dataset.busy;
+      btn.textContent = 'Ya, kirim';
+      updateFileName();
+    }
+  }
+
+  // Pop-up "Soal berhasil dikirim" beserta rincian kiriman.
+  function showSent(m, data) {
+    const asli = data && data.asli || '';
+    const lampiran = /^\+ file asli .* email kedua$/.test(asli) ? 'RTF + file asli (email terpisah)'
+      : /^\+ file asli/.test(asli) ? 'RTF + file asli (.zip)'
+      : /terlalu besar/.test(asli) ? 'RTF saja (file asli terlalu besar)'
+      : 'RTF';
+    const rows = [
+      ['Guru', m.nama],
+      ['Mata pelajaran', m.mapel],
+      ['Kelas', m.kelas],
+      ['Semester', m.semester + ' ' + m.ta + '/' + (Number(m.ta) + 1)],
+      ['Jumlah soal', state.questions.length + ' Soal'],
+      ['Lampiran', lampiran],
+      ['Waktu', new Date().toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short' })],
+    ];
+    $('#sentInfo').innerHTML = rows.map(([k, v]) => '<dt>' + escHtml(k) + '</dt><dd>' + escHtml(v) + '</dd>').join('');
+    $('#sentDialog').showModal();
+    $('#sentClose').focus();
+  }
+  $('#sentClose').addEventListener('click', () => $('#sentDialog').close());
+  $('#sentDialog').addEventListener('click', e => { if (e.target.id === 'sentDialog') e.target.close(); });
+
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+  }
+
+  // ---------- Wiring ----------
+  const drop = $('#drop');
+  $('#fileInput').addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) loadFile(f); });
+  $('#btnPaste').addEventListener('click', () => {
+    const txt = $('#pasteText').value;
+    if (!txt.trim()) return;
+    hideError();
+    processLines(textLines(txt), 'Soal tempel.txt');
+  });
+  $('#btnExport').addEventListener('click', () => openMeta('export'));
+  $('#btnKirim').addEventListener('click', () => openMeta('kirim'));
+  $('#kirimForm').addEventListener('submit', submitMeta);
+  $('#kirimBatal').addEventListener('click', () => $('#kirimDialog').close());
+  window.addEventListener('hashchange', routeAdmin);
+  $('#adminForm').addEventListener('submit', loginAdmin);
+  $('#adminSimpan').addEventListener('click', saveAdmin);
+  $('#adminTutupSimpan').addEventListener('click', () => saveTutup(false));
+  $('#adminBukaKirim').addEventListener('click', () => {
+    if (confirm('Buka lagi pengiriman soal untuk semua guru?')) saveTutup(true);
+  });
+  // Keluar: sandi dihapus dari halaman, kembali ke isian kata sandi.
+  $('#adminKeluar').addEventListener('click', openAdmin);
+  $('#adminKunci').addEventListener('change', syncAdminFields);
+  $('#adminGuruTambah').addEventListener('click', tambahGuru);
+  $('#adminImporFile').addEventListener('change', pilihFileImpor);
+  $('#adminImporSimpan').addEventListener('click', simpanImpor);
+  $('#adminGuruList').addEventListener('click', onAdminGuruClick);
+  $('#adminGuruList').addEventListener('keydown', e => {
+    const li = e.target.closest('li.editing');
+    if (!li || !(e.key === 'Enter' || e.key === 'Escape')) return;
+    e.preventDefault();
+    e.stopPropagation(); // Enter tidak mengirim form admin
+    li.querySelector('[data-g="' + (e.key === 'Enter' ? 'simpan' : 'batal') + '"]').click();
+  });
+  $('#adminCariGuru').addEventListener('input', () => { guruEdit = null; renderAdminGuru(); });
+  $('#adminCariGuru').addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
+  // Enter di isian guru = Tambah guru (bukan Simpan kunci).
+  ['adminGuruNama', 'adminGuruMapel'].forEach(id => $('#' + id).addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); tambahGuru(); }
+  }));
+  loadGuru();
+  routeAdmin();
+  // Soal bisa diubah lagi setelah dialog ditutup: RTF yang sudah disiapkan tidak dipakai ulang.
+  $('#kirimDialog').addEventListener('close', () => { rtfJob = null; });
+  // Pencarian nama guru
+  const guruInput = $('#kirimNama');
+  guruInput.addEventListener('input', () => {
+    $('#kirimMapel').innerHTML = '<option value="">— pilih nama guru dulu —</option>';
+    $('#kirimMapel').disabled = true;
+    updateFileName();
+    renderGuruList();
+  });
+  guruInput.addEventListener('focus', renderGuruList);
+  guruInput.addEventListener('keydown', e => {
+    const items = Array.from($('#guruList').querySelectorAll('li[data-nama]'));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if ($('#guruList').hidden) renderGuruList();
+      guruIdx = Math.max(0, Math.min(items.length - 1, guruIdx + (e.key === 'ArrowDown' ? 1 : -1)));
+      items.forEach((li, i) => li.setAttribute('aria-selected', i === guruIdx ? 'true' : 'false'));
+      if (items[guruIdx]) items[guruIdx].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter' && !$('#guruList').hidden) {
+      e.preventDefault();
+      const li = items[guruIdx >= 0 ? guruIdx : 0];
+      if (li) setGuru(li.dataset.nama);
+    } else if (e.key === 'Escape' && !$('#guruList').hidden) {
+      e.preventDefault();
+      closeGuruList();
+    }
+  });
+  $('#guruList').addEventListener('mousedown', e => {
+    const li = e.target.closest('li[data-nama]');
+    if (li) { e.preventDefault(); setGuru(li.dataset.nama); }
+  });
+  guruInput.addEventListener('blur', () => setTimeout(closeGuruList, 150));
+
+  // ---------- Pencarian mata pelajaran (kolom [data-mapel-cari] di menu admin) ----------
+  // Mengganti <datalist>: saat kolom sudah berisi mapel lama (mode edit), datalist hanya menampilkan
+  // mapel yang cocok dengan isi itu. Di sini fokus = semua mapel tampil, mengetik = disaring (tanpa
+  // peduli huruf besar/kecil/tanda baca). Nama mapel baru tetap boleh diketik bebas.
+  const mapelBox = { input: null, idx: -1, el: document.createElement('ul') };
+  mapelBox.el.className = 'guru-list mapel-cari-list';
+  mapelBox.el.setAttribute('role', 'listbox');
+  mapelBox.el.hidden = true;
+  function mapelItems() { return Array.from(mapelBox.el.querySelectorAll('li[data-mapel]')); }
+  function placeMapelBox() {
+    const r = mapelBox.input.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom;
+    Object.assign(mapelBox.el.style, { position: 'fixed', left: r.left + 'px', width: r.width + 'px', right: 'auto' });
+    if (below < 180 && r.top > below) { mapelBox.el.style.top = 'auto'; mapelBox.el.style.bottom = (window.innerHeight - r.top + 2) + 'px'; }
+    else { mapelBox.el.style.bottom = 'auto'; mapelBox.el.style.top = (r.bottom + 2) + 'px'; }
+  }
+  function openMapelBox(input, filter) {
+    mapelBox.input = input;
+    // Di dalam <dialog> agar tampil di atas latar dialog.
+    const host = input.closest('dialog') || document.body;
+    if (mapelBox.el.parentNode !== host) host.appendChild(mapelBox.el);
+    const q = filter ? fold(input.value) : '';
+    const cur = input.value.trim();
+    const hits = mapelNames.filter(m => !q || fold(m).includes(q));
+    mapelBox.idx = filter ? -1 : hits.indexOf(cur);
+    mapelBox.el.innerHTML = hits.length
+      ? hits.map((m, i) => '<li role="option" data-mapel="' + escHtml(m) + '" aria-selected="' + (i === mapelBox.idx) + '">' + escHtml(m) + '</li>').join('')
+      : '<li class="empty">Belum ada mapel ini. Nama yang diketik akan dipakai sebagai mapel baru.</li>';
+    mapelBox.el.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    placeMapelBox();
+    const sel = mapelItems()[mapelBox.idx];
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
+  function closeMapelBox() {
+    mapelBox.el.hidden = true;
+    if (mapelBox.input) mapelBox.input.setAttribute('aria-expanded', 'false');
+  }
+  function pickMapel(li) {
+    const input = mapelBox.input;
+    input.value = li.dataset.mapel;
+    closeMapelBox();
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  document.addEventListener('focusin', e => {
+    if (e.target.matches && e.target.matches('[data-mapel-cari]')) { e.target.select(); openMapelBox(e.target, false); }
+  });
+  document.addEventListener('input', e => {
+    if (e.target.matches && e.target.matches('[data-mapel-cari]')) openMapelBox(e.target, true);
+  });
+  document.addEventListener('focusout', e => {
+    if (e.target === mapelBox.input) setTimeout(() => { if (document.activeElement !== mapelBox.input) closeMapelBox(); }, 150);
+  });
+  // Fase capture: Enter/Escape untuk daftar mapel tidak ikut menyimpan edit, menambah guru, atau menutup dialog.
+  document.addEventListener('keydown', e => {
+    if (e.target !== mapelBox.input || !e.target.matches('[data-mapel-cari]')) return;
+    const items = mapelItems();
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (mapelBox.el.hidden) return openMapelBox(e.target, false);
+      mapelBox.idx = Math.max(0, Math.min(items.length - 1, mapelBox.idx + (e.key === 'ArrowDown' ? 1 : -1)));
+      items.forEach((li, i) => li.setAttribute('aria-selected', i === mapelBox.idx ? 'true' : 'false'));
+      if (items[mapelBox.idx]) items[mapelBox.idx].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter' && !mapelBox.el.hidden && items[mapelBox.idx]) {
+      e.preventDefault();
+      e.stopPropagation();
+      pickMapel(items[mapelBox.idx]);
+    } else if (e.key === 'Escape' && !mapelBox.el.hidden) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMapelBox();
+    } else if (e.key === 'Tab' || e.key === 'Enter') {
+      closeMapelBox();
+    }
+  }, true);
+  mapelBox.el.addEventListener('mousedown', e => {
+    const li = e.target.closest('li[data-mapel]');
+    e.preventDefault(); // fokus tetap di kolom mapel
+    if (li) pickMapel(li);
+  });
+  // Daftar ikut bergeser saat dialog/daftar guru di-scroll.
+  document.addEventListener('scroll', e => {
+    if (!mapelBox.el.hidden && mapelBox.input && e.target !== mapelBox.el) {
+      if (!mapelBox.input.isConnected) return closeMapelBox();
+      placeMapelBox();
+    }
+  }, true);
+  window.addEventListener('resize', () => { if (!mapelBox.el.hidden) placeMapelBox(); });
+  ['kirimKelas', 'kirimSemester', 'kirimTA'].forEach(id => $('#' + id).addEventListener('change', updateFileName));
+  $('#btnReset').addEventListener('click', () => {
+    $('#work').hidden = true;
+    $('#topActions').hidden = true;
+    $('#start').hidden = false;
+    $('#fileInput').value = '';
+  });
+  // Tambah soal (tombol di atas dan di bawah daftar): soal pilihan ganda kosong di akhir daftar.
+  document.addEventListener('click', e => {
+    if (!e.target.closest('[data-add]')) return;
+    const nq = blankQuestion();
+    state.questions.push(nq);
+    renderAll();
+    focusStem(nq);
+    toast('Soal no. ' + numbers().get(nq.id) + ' ditambahkan');
+  });
+
+  const qs = $('#questions');
+  qs.addEventListener('click', e => {
+    const b = e.target.closest('button[data-act]');
+    if (b) onAction(b);
+  });
+  qs.addEventListener('input', onInput);
+  qs.addEventListener('paste', onPaste);
+  qs.addEventListener('keydown', e => {
+    const t = e.target;
+    const field = t.dataset && t.dataset.field;
+    // Tab: sisipkan tab (menjorokkan akun kredit / meratakan nominal), bukan pindah fokus.
+    if (e.key === 'Tab' && !e.shiftKey && (field === 'opt' || field === 'stem')) {
+      e.preventDefault();
+      document.execCommand('insertText', false, '\t');
+      return;
+    }
+    // Shift+Enter di opsi: baris baru di dalam opsi (mis. baris kredit jurnal).
+    if (e.key === 'Enter' && e.shiftKey && field === 'opt') {
+      e.preventDefault();
+      document.execCommand('insertLineBreak');
+      t.classList.add('multi');
+      return;
+    }
+    if (e.key === 'Enter' && field === 'opt') {
+      e.preventDefault();
+      const all = Array.from(t.closest('.opts').querySelectorAll('[data-field="opt"]'));
+      const next = all[all.indexOf(t) + 1];
+      if (next) next.focus();
+      else t.closest('.q').querySelector('[data-act="addopt"]').click();
+    }
+  });
+
+  $('#issueList').addEventListener('click', e => {
+    const b = e.target.closest('[data-go]');
+    if (!b) return;
+    const el = document.getElementById('q' + b.dataset.go);
+    if (!el) return;
+    el.hidden = false;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  });
+
+  document.querySelector('.seg').addEventListener('click', e => {
+    const b = e.target.closest('button[data-filter]');
+    if (!b) return;
+    state.filter = b.dataset.filter;
+    document.querySelectorAll('.seg button').forEach(x => x.classList.toggle('on', x === b));
+    applyFilter();
+  });
+
+  ['cfgOpt', 'cfgTitle'].forEach(id => $('#' + id).addEventListener('change', renderAll));
+  $('#imgDialogClose').addEventListener('click', () => $('#imgDialog').close());
+  $('#imgDialog').addEventListener('click', e => { if (e.target.id === 'imgDialog') e.target.close(); });
+})();
